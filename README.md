@@ -527,8 +527,18 @@ The checkpoint's own sampling defaults apply (temperature 1.0, top_p 0.95). Per 
 
 - Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/models`, `/tokenize` and
   `/detokenize` (also under `/v1/`), `/health`, and Prometheus `/metrics` (TensorFold v0.6.0's request counters,
-  latency and time-to-first-token histograms, plus `/health`'s figures as `tensorfold_health:` metrics). No Anthropic
-  `/v1/messages`.
+  latency and time-to-first-token histograms, plus `/health`'s figures as `tensorfold_health:` metrics); and
+  Anthropic's `/v1/messages` (also `/messages`, with `/count_tokens` suffixes) (patch `0084`; upstream TensorFold
+  v0.6.3). Anthropic requests are translated to the same chat completion the OpenAI route serves: system prompts,
+  text and image blocks, `tool_use` / `tool_result` blocks, thinking blocks as `reasoning_content`, `stop_sequences`,
+  and `output_config.effort` / `output_config.format` map onto their OpenAI fields; thinking maps onto
+  `enable_thinking` plus `thinking_budget`. Streaming replies are Anthropic SSE (`message_start`,
+  `content_block_start/delta/stop`, `message_delta`, `message_stop`); a matched `stop_sequences` entry comes back as
+  `stop_reason: "stop_sequence"` with the string in `stop_sequence`. Bodies are capped at 32 MiB (chunked request
+  bodies are accepted; conflicting `Content-Length` headers are refused with the connection closed).
+  `redacted_thinking` is refused (this local model cannot decode it), as are `container`, `mcp_servers`,
+  `service_tier`, and any `context_management` beyond `clear_thinking` with `keep: all`. Capacity refusals arrive as
+  429 with an Anthropic `overloaded_error` body.
 - **Context limits:** a request whose prompt plus `max_tokens` does not fit the window is refused with HTTP 400 in
   OpenAI's wording, `"code": "context_length_exceeded"` and `param` naming the field (`messages` or `prompt`).
 - **Tool calling:** `tools` / `tool_calls`, each call streamed whole once it is written (empty deltas every 2 s
@@ -585,6 +595,7 @@ applied with `patch -p0` in filename order); `start.sh` rebuilds or re-pulls the
 | Capacity status | `0081-tfcap-capacity-status` | every capacity refusal renders the same way: 429 with `Retry-After: 5` (was a bare 503 at two sites, a 400 on the generate path) (by johnwhited, #48) | a refused request's client can back off instead of stacking |
 | Admission control | `0082-tfcap-admission-cap` | `TF_GLM_MAX_QUEUED` (unset: queue, as before; a number: past the lanes plus that many queued foreground requests, refuse) turns saturation into a refusal instead of an invisible queue (by johnwhited, #48) | with `TF_GLM_MAX_QUEUED=0`, the fifth request on four lanes: 429 at once with `Retry-After: 5`; unset, it queues as before |
 | Delivery abort | `0083-tfcap-delivery-abort` | a stream whose delivery callback raises (broken pipe, reset, timeout) ends at once and frees its lane, instead of the exception escaping and the lane leaking until generation ends (by johnwhited, #48) | a client that dies mid-reply no longer holds a lane |
+| Anthropic Messages | `0084-anthropic-messages` | Anthropic's `/v1/messages` (also `/messages`, with `/count_tokens` suffixes), translated to the same chat completion the OpenAI route serves — text and image blocks, `tool_use` / `tool_result`, thinking, `stop_sequences`, `output_config` effort/JSON schema — with Anthropic SSE streaming and bodies capped at 32 MiB (upstream v0.6.3, by evilpsycho42 and ashhart) | Claude Code and the Anthropic SDKs work against the server directly, without a translating proxy |
 | Concurrent fill | `0062-glm-sliced-fill` | a new prompt's chunks run in layer slices (`FILL_BUDGET_MS`) with decode rounds between them, drafted as usual (`FILL_DRAFTS`), both ranks on the same layer boundaries; the chunk's buffers kept between slices, grouped fills, cache moves and cancellation mid-fill; whole forwards when nothing else decodes | with smooth streaming, the other replies' pauses during a 25k-token fill 630-690 ms -> 81-149 ms (table below) |
 
 Concurrent prompt fill and smooth streaming on two Sparks (`PARALLEL=4`, DFlash2, 1,024-row chunks): three 400-token
