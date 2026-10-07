@@ -36,7 +36,7 @@ jobs = jobs + [(n+'-repeat2', p, t) for n,p,t in jobs[:2]]
 def main(argv=None):
     global BASE, HEALTH, MODEL
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--model', required=True, choices=('GLM-5.3-Flash-EXL3','GLM-5.3-Flash-EXL3-Abliterated'))
+    parser.add_argument('--model', required=True, help='the served model id, e.g. GLM-5.3-Flash-EXL3')
     parser.add_argument('--base-url', default=BASE)
     parser.add_argument('--health-url', default=HEALTH)
     parser.add_argument('--exclusive', action='store_true', help='Reject telemetry showing concurrent inference')

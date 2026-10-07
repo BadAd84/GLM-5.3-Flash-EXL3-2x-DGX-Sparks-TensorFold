@@ -16,6 +16,9 @@ Every change to this recipe, newest first. Each release names the image it serve
   counts it. Paraphrase loops still need `--thinking-budget`. CPU test: `tools/test_loop_guard.py`.
 - **The start's smoke test fails on one repeated character** (#76, #81, #86): a collapsed model that answers "!!!!" no
   longer passes as OK.
+- **Hermes Agent** (`docs/hermes-agent.md`, `tools/hermes_benchmark.py`, `tests/test_hermes_benchmark.py`, by Steve
+  Darlow, @kerpopule, PR #52): how to use the server as Hermes Agent's custom endpoint, and a stdlib harness that times
+  synthetic requests against an idle server (any `--model` id; `/health` fields read as the server reports them).
 - **Long-context decode** (patch `0085-glm-select-split-loop`): the DSA indexer's split top-k selection
   (`select_split`, in `0029`'s segmented decode windows) ran its last pass as one `CP x 256` tile per chunk program,
   masked to the chunks before it. `CP` comes from the selection scratch, which `verify.py` sizes for the whole KV

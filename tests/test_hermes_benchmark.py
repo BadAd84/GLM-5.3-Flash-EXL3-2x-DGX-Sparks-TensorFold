@@ -17,11 +17,19 @@ class HarnessTests(unittest.TestCase):
         self.assertIsNone(b.MODEL)
         self.assertEqual(b.BASE,'http://127.0.0.1:8888/v1')
 
-    def test_unrecognized_model_rejected_before_network(self):
+    def test_any_model_id_is_accepted(self):
+        class Stop(Exception):
+            pass
+        with patch.object(b,'get_health',side_effect=Stop):
+            with self.assertRaises(Stop):
+                b.main(['--model','some-other-served-name'])
+        self.assertEqual(b.MODEL,'some-other-served-name')
+
+    def test_model_is_required(self):
         with patch.object(b.opener,'open') as request:
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    b.main(['--model','wrong-model'])
+                    b.main([])
             request.assert_not_called()
 
     def test_exact_matched_prompt_set(self):

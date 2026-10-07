@@ -149,6 +149,10 @@ log, runs a smoke test through both ranks, and prints `GLM-5.3-Flash-EXL3 is now
 Any OpenAI client works with `base_url = "http://<head-address>:8888/v1"` and the model `GLM-5.3-Flash-EXL3`. The model
 thinks before it answers (`reasoning_content`), so give replies enough `max_tokens`.
 
+[Hermes Agent](https://hermes-agent.nousresearch.com/) (Nous Research) uses it as a custom endpoint: the setup and a synthetic
+speed harness (`tools/hermes_benchmark.py`) are in [`docs/hermes-agent.md`](docs/hermes-agent.md), by Steve Darlow
+([@kerpopule](https://github.com/kerpopule)).
+
 ```bash
 curl -s http://<head-address>:8888/v1/models
 curl -s http://<head-address>:8888/v1/chat/completions -H 'Content-Type: application/json' -d '{

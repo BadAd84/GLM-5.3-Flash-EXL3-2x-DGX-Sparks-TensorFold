@@ -132,6 +132,9 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   [kindling spark-os](https://github.com/kindlingai/kindling-spark-os) by Matt Mastracci (Kindling AI). Nothing of
   dispram ships here: the ranks import the host's client (`python/dispram.py`, GPL-3.0 with a bundling exception)
   mounted read-only at run time and talk to `dispramd` (AGPL-3.0) over its socket.
+- `docs/hermes-agent.md`, `tools/hermes_benchmark.py` and `tests/test_hermes_benchmark.py` (the Hermes Agent custom-endpoint
+  guide and the synthetic speed harness with its tests): by Steve Darlow ([kerpopule](https://github.com/kerpopule)),
+  in [PR #52](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/52).
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or
   quote as context stays under TensorFold's licenses (Apache 2.0, and MIT for code written before v0.6.0; see
