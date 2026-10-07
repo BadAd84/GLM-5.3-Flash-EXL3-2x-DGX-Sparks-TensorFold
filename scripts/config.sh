@@ -207,6 +207,15 @@ fi
 # or four alternating conversations push each other out (issue #17). Each entry reserves its fixed state (~45 MiB) at
 # start: 32 takes ~1 GiB more than 8.
 export TF_GLM_CACHE_ENTRIES="${TF_GLM_CACHE_ENTRIES:-32}"
+# Two more limits on the kept states (patch 0089, both off by default; PR #65 by Thomas Wade): TF_GLM_KEPT_BYTES_GIB
+# caps the device memory the kept states own outside the pool (their DFlash2 window copies and recurrent state, ~45 MiB
+# each without a window, hundreds of MB with long ones), together: 0 is no cap, 4 is the author's value; past it the
+# least valuable state is dropped (by the same order as the entry count's) and freed blocks go back to the driver.
+# TF_GLM_KEEP_PER_CHAT keeps at most this many of one conversation's own turn-boundary states (the author runs 2; 0 is
+# no limit): one long chat can no longer fill the entries alone. Neither is written to the spill tier when it drops.
+# /health shows kept_bytes, kept_bytes_cap and kept_mix.
+export TF_GLM_KEPT_BYTES_GIB="${TF_GLM_KEPT_BYTES_GIB:-0}"
+export TF_GLM_KEEP_PER_CHAT="${TF_GLM_KEEP_PER_CHAT:-0}"
 # Earlier turns keep their reasoning in the prompt (patch 0060), as in zai-org's current template. 1: drop it, as the
 # checkpoint's template does; agents then prefill the previous turn's tool loop again at each new user message.
 export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
@@ -362,3 +371,18 @@ prepared_state() {
   done
   echo "$line"
 }
+
+# Spill tier (patch 0088-glm-spill-tier, off by default): kept prompt states go to local disk on each Spark and come
+# back instead of a new prefill, also after a clean restart. SPILL_GIB: the cap per Spark (0: off). SPILL_DIR: the same
+# absolute path on every Spark (mounted at /spill; files owned by your user). SPILL_HIGHWATER: past this fraction of
+# the KV pool, the kept prompts eviction would take next are written in the background (1.0: only when evicted).
+# A clean stop writes what is kept within SPILL_FLUSH_S seconds; STOP_TIMEOUT gives it the time. README: Spill tier.
+SPILL_GIB="${SPILL_GIB:-0}"
+SPILL_DIR="${SPILL_DIR:-$HOME/.cache/tensorfold-spill}"
+SPILL_HIGHWATER="${SPILL_HIGHWATER:-0.70}"
+SPILL_MIN_TOKENS="${SPILL_MIN_TOKENS:-8192}"
+SPILL_MIN_FREE_GIB="${SPILL_MIN_FREE_GIB:-50}"
+SPILL_FLUSH_S="${SPILL_FLUSH_S:-60}"
+if [[ "$SPILL_GIB" != 0 ]]; then
+  STOP_TIMEOUT="${STOP_TIMEOUT:-$(( ${SPILL_FLUSH_S%.*} + 30 ))}"
+fi

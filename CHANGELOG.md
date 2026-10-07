@@ -63,6 +63,23 @@ Every change to this recipe, newest first. Each release names the image it serve
   passes 53/53 through the dispram span (display -> device copies 46.3 GiB/s); decode and prefill as without the span
   (structured / prose / code 140.4 / 74.3 / 112.5 tok/s against 141.2 / 74.2 / 112.5; drafted replies equal serial
   ones 7/7); an NVMe-backed restart and eviction test with the span on resumed byte-identical replies.
+- **Spill tier** (patch `0088-glm-spill-tier`; `SPILL_GIB`, `SPILL_DIR`, `SPILL_HIGHWATER`; off by default): a kept
+  prompt state that leaves the KV pool is written to local disk on each Spark and read back when a later request
+  extends it, also after a clean restart, instead of a new prefill. Past `SPILL_HIGHWATER` (0.70) of the pool the
+  states eviction would take next are written early, in the background, so an eviction frees its rows at once; a
+  restore reads on a background thread while other streams keep decoding. Every read is checked against per-block
+  CRC-32s, and the files are private to you. Prompts with images or video are stored under their pictures'
+  content (`PARALLEL` above 1). It works beside `DISPLAY_KV_MIB` (rows in the display reservation go to and from disk
+  through a kernel, as the pool's own moves there do). Authored by Robert Wojciechowski
+  ([wojo](https://github.com/wojo), PR #78); credits in `NOTICE` and `CREDITS.md`.
+  Numbers: README, "Spill tier".
+- **Kept-state limits** (patch `0089-glm-kept-state`; `TF_GLM_KEPT_BYTES_GIB`, `TF_GLM_KEEP_PER_CHAT`; both off by
+  default): a byte budget for the device memory the kept prompt states own outside the pool (past it the entry cap's
+  victim order drops states, rank 0 deciding, and freed blocks go back to the driver once 512 MB has piled up), and a
+  per-conversation quota of turn-boundary states, so one long chat cannot fill the entries alone. States dropped by
+  either limit are not written to the spill tier (`0088`). `/health` gains `kept_bytes`, `kept_bytes_cap` and
+  `kept_mix`. Authored by Thomas Wade ([ThomasWadeZ](https://github.com/ThomasWadeZ), PR #65); the PR's copy-over-cut
+  part is `0071` already and is not included.
 
 ## v1.8 (2026-10-06): pictures read once, quoted markers, capacity refusals, and the take-over memory fix
 
