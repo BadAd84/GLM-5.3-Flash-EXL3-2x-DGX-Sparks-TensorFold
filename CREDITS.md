@@ -124,7 +124,7 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
 - `0085-glm-select-split-loop` (the split selection's last pass over the earlier chunks only): by
 - `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by
   [BadAd84](https://github.com/BadAd84).
-- `0084-glm-display-kv-dispram` (`DISPLAY_KV_BACKEND=dispram`: `0072`'s display reservation on kindling spark-os): by
+- `0087-glm-display-kv-dispram` (`DISPLAY_KV_BACKEND=dispram`: `0072`'s display reservation on kindling spark-os): by
   [BadAd84](https://github.com/BadAd84). It maps the span through `dispram`, the display-carveout lender of
   [kindling spark-os](https://github.com/kindlingai/kindling-spark-os) by Matt Mastracci (Kindling AI). Nothing of
   dispram ships here: the ranks import the host's client (`python/dispram.py`, GPL-3.0 with a bundling exception)

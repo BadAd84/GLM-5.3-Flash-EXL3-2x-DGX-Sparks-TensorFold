@@ -308,7 +308,7 @@ env_args() {
 env_args
 RUN_ARGS=(--gpus all --ipc=host --network host --shm-size 16g --device /dev/infiniband --cap-add IPC_LOCK
           --ulimit memlock=-1 --ulimit stack=67108864)
-# DISPLAY_KV_BACKEND=dispram (patch 0084): dispramd's socket and its python client in every rank
+# DISPLAY_KV_BACKEND=dispram (patch 0087): dispramd's socket and its python client in every rank
 if (( DISPLAY_KV_MIB )) && [[ "$DISPLAY_KV_BACKEND" == dispram ]]; then
   RUN_ARGS+=(-v /run/dispram:/run/dispram -v /opt/kindling/dispram/python:/opt/dispram:ro -e PYTHONPATH=/opt/dispram)
 fi

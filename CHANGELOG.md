@@ -27,7 +27,7 @@ Every change to this recipe, newest first. Each release names the image it serve
   all rows' heads, is faster still but changes the head sum's rounding). Every score bit and selection
   identical (`tools/scores_loop_check.py`, 37 checks). Live on three Sparks: the same prompts cold, 35k 17.87 ->
   17.47 s, 226k 138.27 -> 126.60 s, replies byte-identical. `TF_GLM_SCORE_RB` is retired.
-- **`DISPLAY_KV_BACKEND=dispram`** (patch `0084-glm-display-kv-dispram`; default `drm`, unchanged): `DISPLAY_KV_MIB` on
+- **`DISPLAY_KV_BACKEND=dispram`** (patch `0087-glm-display-kv-dispram`; default `drm`, unchanged): `DISPLAY_KV_MIB` on
   [kindling spark-os](https://github.com/kindlingai/kindling-spark-os). There `nvidia_drm` runs without modeset, so
   `0072`'s DRM dumb buffer fails (`DRM_IOCTL_MODE_CREATE_DUMB`: ENOSYS) and the span never forms; kindling's
   `dispramd` owns the reservation and lends it through its client's `map_glued` (ordinary device memory with the

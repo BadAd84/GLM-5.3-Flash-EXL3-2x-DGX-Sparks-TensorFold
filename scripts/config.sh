@@ -279,7 +279,7 @@ export TF_GLM_CACHE_GIB="$KV_POOL_GIB"
 # to card0. Needs /dev/dri/card0 in the containers (nvidia_drm with modeset=1; --gpus all passes it). 0 (default): off.
 DISPLAY_KV_MIB="${DISPLAY_KV_MIB:-0}"
 export TF_GLM_DISPLAY_KV_MIB="$DISPLAY_KV_MIB"
-# Where the span's reservation half comes from (patch 0084): drm (default) maps a DRM dumb buffer on card0, as above;
+# Where the span's reservation half comes from (patch 0087): drm (default) maps a DRM dumb buffer on card0, as above;
 # dispram takes it from the dispramd daemon of kindling spark-os, whose nvidia_drm runs without modeset (no dumb
 # buffers: CREATE_DUMB fails ENOSYS) and whose daemon owns the reservation. start.sh mounts dispramd's socket and its
 # python client into every rank for dispram and refuses a Spark without them.

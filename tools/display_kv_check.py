@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks for patches 0072 (DISPLAY_KV_MIB) and 0084 (DISPLAY_KV_BACKEND=dispram), run inside the image that
+"""Checks for patches 0072 (DISPLAY_KV_MIB) and 0087 (DISPLAY_KV_BACKEND=dispram), run inside the image that
 scripts/prepare.sh built:
 
     docker run --rm --gpus all --entrypoint python -v "$PWD/tools/display_kv_check.py:/c.py" tensorfold-glm53:v0.6.0 \
@@ -7,7 +7,7 @@ scripts/prepare.sh built:
 
 Without --gpu: the setting, the refusal while a display is connected, how many latent planes the span takes, the span's mapping and unwinding (a fake for every
 DRM and CUDA driver call), the planes carved from a span, the pool's row copies of spanned planes against stock
-ones, and 0084's backend switch and refusals (a fake dispram client). With --gpu, on a Spark whose display reservation
+ones, and 0087's backend switch and refusals (a fake dispram client). With --gpu, on a Spark whose display reservation
 is free (the server stopped, or started with DISPLAY_KV_MIB=0): the real span, written and read back by the GPU across
 both halves, and a pool copy across the boundary. On kindling spark-os, run the GPU half through dispramd: add
 -e TF_GLM_DISPLAY_KV_BACKEND=dispram and start.sh's mounts (-v /run/dispram:/run/dispram -v
@@ -23,7 +23,7 @@ from tensorfold.families.glm5_next.cuda import kv8
 
 MIB = 2 ** 20
 failures = []
-# the backend the --gpu half maps the real span through (patch 0084); the fake driver checks below use drm
+# the backend the --gpu half maps the real span through (patch 0087); the fake driver checks below use drm
 GPU_BACKEND = os.environ.pop(dk.BACKEND_ENV, None)
 
 
@@ -40,7 +40,7 @@ def raises(call, *args, match=""):
         return match in str(exc)
     return False
 
-# patch 0084: with DISPLAY_KV_BACKEND unset the span is the DRM path's, which every fake driver check below drives
+# patch 0087: with DISPLAY_KV_BACKEND unset the span is the DRM path's, which every fake driver check below drives
 check("the backend is drm unless DISPLAY_KV_BACKEND says otherwise", dk.backend() == "drm")
 
 
@@ -242,7 +242,7 @@ for dtype, shape in ((torch.uint8, (64, 528)), (torch.bfloat16, (64, 512))):
         check(f"spanned rows copy as stock, by a kernel: {dtype} {src}->{dst} x{n}", same and by_kernel,
               f"stock kernel calls {stock_calls}, spanned {len(calls) - stock_calls}")
 
-# -- patch 0084: the reservation from kindling's dispramd (DISPLAY_KV_BACKEND=dispram) --------------------------------
+# -- patch 0087: the reservation from kindling's dispramd (DISPLAY_KV_BACKEND=dispram) --------------------------------
 import importlib                                                                                         # noqa: E402
 
 importlib.reload(dk)                        # the real map_span again (the sections above replaced it)
