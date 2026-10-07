@@ -122,6 +122,7 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   e9fade0, with ced6139's request framing) by [evilpsycho42](https://github.com/evilpsycho42) and
   [ashhart](https://github.com/ashhart), backported to v0.6.0.
 - `0085-glm-select-split-loop` (the split selection's last pass over the earlier chunks only): by
+- `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by
   [BadAd84](https://github.com/BadAd84).
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or

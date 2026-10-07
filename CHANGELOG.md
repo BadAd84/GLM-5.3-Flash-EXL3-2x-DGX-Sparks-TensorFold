@@ -17,6 +17,16 @@ Every change to this recipe, newest first. Each release names the image it serve
   identical (`tools/select_split_check.py`: 149 checks against the kernel before the patch and a torch oracle).
   Live on three Sparks (`PARALLEL=4`), one request: decode at 35k / 226k / 590k 182.6 / 111.2 / 66.2 ->
   203.0 / 191.0 / 184.4 tok/s, replies byte-identical.
+- **Long-context cold prefill** (patch `0086-glm-prompt-scores-loop`): what grows with context in a cold prefill is
+  the indexer's prompt scoring and selection (nsys on rank 0, two cold prompts of 35k and 226k tokens: the whole
+  prefill 585 -> 687 us of kernel time a prompt token, `_scores` 16.3 -> 103.6 of it, `_select_rows` 3.0 ->
+  25.6, everything else flat). `0009`'s `_scores` ran 4 rows and one 64-pool block a program and reloaded each
+  row's 8 KB of queries for every block; it now takes one row and 32 blocks a program (`SCORE_LOOP`), the row's
+  queries and head weights loaded once, each block computed exactly as a 1-row program did. A 512-row block at
+  row positions 35k / 113k / 300k: 1.354 / 4.298 / 11.304 -> 0.867 / 2.766 / 7.250 ms (8 warps, or one dot over
+  all rows' heads, is faster still but changes the head sum's rounding). Every score bit and selection
+  identical (`tools/scores_loop_check.py`, 37 checks). Live on three Sparks: the same prompts cold, 35k 17.87 ->
+  17.47 s, 226k 138.27 -> 126.60 s, replies byte-identical. `TF_GLM_SCORE_RB` is retired.
 
 ## v1.8 (2026-10-06): pictures read once, quoted markers, capacity refusals, and the take-over memory fix
 
