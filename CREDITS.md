@@ -118,6 +118,9 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   [johnwhited](https://github.com/johnwhited) (#48); the admission check and the abort-on-delivery-failure semantics
   follow [vLLM](https://github.com/vllm-project/vllm) v1's `check_admission` and generate-abort behaviour
   (Apache 2.0) as a reference.
+- `0084-anthropic-messages`: TensorFold v0.6.3's Anthropic Messages API (commits 8cca6e3 and ba18743, merged as
+  e9fade0, with ced6139's request framing) by [evilpsycho42](https://github.com/evilpsycho42) and
+  [ashhart](https://github.com/ashhart), backported to v0.6.0.
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or
   quote as context stays under TensorFold's licenses (Apache 2.0, and MIT for code written before v0.6.0; see
