@@ -3,6 +3,21 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **Long-context decode** (patch `0085-glm-select-split-loop`): the DSA indexer's split top-k selection
+  (`select_split`, in `0029`'s segmented decode windows) ran its last pass as one `CP x 256` tile per chunk program,
+  masked to the chunks before it. `CP` comes from the selection scratch, which `verify.py` sizes for the whole KV
+  pool (5,791,744 rows at `PARALLEL=4` on three Sparks: 512 chunks a row), not the row's context, so every program
+  loaded and summed the full table: on rank 0 at 226k, 5.3 ms a launch and 92% of the growth of one request's decode
+  round from 35k (nsys: the selection 9.3 -> 56.9 ms of a round's GPU time, everything else +4.3). The pass now sums
+  only the earlier chunks' histograms, 16 at a time (`SPLIT_BLK`). The whole selection call, scoring included, at 16
+  rows: 0.96 -> 0.10 ms at 35k, 5.79 -> 0.28 at 226k, 15.68 -> 0.64 at 590k, 27.87 -> 1.08 at 1.04M; four requests x
+  8 rows at 590k 32.46 -> 1.27 (11 layers a round). Integer sums in another order: the tokens and counts are
+  identical (`tools/select_split_check.py`: 149 checks against the kernel before the patch and a torch oracle).
+  Live on three Sparks (`PARALLEL=4`), one request: decode at 35k / 226k / 590k 182.6 / 111.2 / 66.2 ->
+  203.0 / 191.0 / 184.4 tok/s, replies byte-identical.
+
 ## v1.8 (2026-10-06): pictures read once, quoted markers, capacity refusals, and the take-over memory fix
 
 Image: `v0.6.0-31557ed1cef6` (`sha256:cbb4b3c66273e2965dd40a7227e7a5243db333fe250113fb3987462ad4f12588`), 82 patches, for two and three Sparks (v1.7.1's plus `0078`-`0083`). Every change below was also
