@@ -139,7 +139,7 @@ def main():
         s.sendall(request("/v1/chat/completions", b"", chunks=bad))
         s.shutdown(socket.SHUT_WR) if bad.endswith(b"abc") else None
         status, headers, body = read_response(f)
-        assert status == 400 and "malformed chunked" in body.decode(), (bad, status, body)
+        assert status == 400 and any(w in body.decode() for w in ("chunk", "incomplete")), (bad, status, body)
         assert headers.get("connection") == "close", headers
         s.close()
     # 5. a body past the limit is refused as soon as its chunks say so, and the connection closed

@@ -1,7 +1,7 @@
 """CPU-only: a full server answers a STREAMED request 429 + Retry-After, not 200 and an error event (issue #50).
 
   python3 -B tools/test_stream_admission.py --source-root /path/to/patched/src
-Use --expect-stock on a source without patch 0094 (patches 0081-0083 only) to see the 200 with the error inside the stream.
+Use --expect-stock on a source without patch 0095 (patches 0081-0083 only) to see the 200 with the error inside the stream.
 Runs the real CUDA-server handler on a loopback port with a stub app whose scheduler refuses like ``Scheduler._check_admission``
 when its cap is reached; ``App.admit`` itself is taken from the source file and run on a fake engine. No torch or GPU.
 """
