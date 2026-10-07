@@ -16,6 +16,12 @@ Every change to this recipe, newest first. Each release names the image it serve
   counts it. Paraphrase loops still need `--thinking-budget`. CPU test: `tools/test_loop_guard.py`.
 - **The start's smoke test fails on one repeated character** (#76, #81, #86): a collapsed model that answers "!!!!" no
   longer passes as OK.
+- **Expert decode launch order** (patch `0090-glm-expert-launch-order`, by Lukasz Raczylo, @lukaszraczylo, PR #95):
+  `TF_GLM_EXL3_DEC_ORDER=1` (or `2`) maps the decode expert kernel's block grid so that the eight 128-column blocks of
+  one k slice run together and read contiguous memory; the same bits for every value. Off by default (`0`, the old
+  order). His run: one request +2.2%, four at once noisy. The patch's variable is its own: his `TF_GLM_EXL3_ORDER` is
+  patch `0020`'s prompt order (default on, any value but `0`), so `true` would have raised and `1` would have turned
+  the new order on for existing users.
 - **Long-context decode** (patch `0085-glm-select-split-loop`): the DSA indexer's split top-k selection
   (`select_split`, in `0029`'s segmented decode windows) ran its last pass as one `CP x 256` tile per chunk program,
   masked to the chunks before it. `CP` comes from the selection scratch, which `verify.py` sizes for the whole KV
