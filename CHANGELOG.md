@@ -3,6 +3,21 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **`DISPLAY_KV_BACKEND=dispram`** (patch `0084-glm-display-kv-dispram`; default `drm`, unchanged): `DISPLAY_KV_MIB` on
+  [kindling spark-os](https://github.com/kindlingai/kindling-spark-os). There `nvidia_drm` runs without modeset, so
+  `0072`'s DRM dumb buffer fails (`DRM_IOCTL_MODE_CREATE_DUMB`: ENOSYS) and the span never forms; kindling's
+  `dispramd` owns the reservation and lends it through its client's `map_glued` (ordinary device memory with the
+  reservation's slice right above it, one virtual range - the layout `0072`'s `map_span` builds). The backend takes
+  the span from there and everything carved from it is `0072`'s, unchanged. Fails closed like the DRM path: no client,
+  no daemon, or a slice shorter than the span stops the start. `start.sh` checks `/run/dispram/dispram.sock` and
+  `/opt/kindling/dispram/python` on the head and mounts both into every rank. Measured on three Sparks (TP=3,
+  `PARALLEL=4`, `KV_POOL_GIB=30`): 2032 MiB adds 317,440 pool tokens; `tools/display_kv_check.py`'s GPU check
+  passes 53/53 through the dispram span (display -> device copies 46.3 GiB/s); decode and prefill as without the span
+  (structured / prose / code 140.4 / 74.3 / 112.5 tok/s against 141.2 / 74.2 / 112.5; drafted replies equal serial
+  ones 7/7); an NVMe-backed restart and eviction test with the span on resumed byte-identical replies.
+
 ## v1.8 (2026-10-06): pictures read once, quoted markers, capacity refusals, and the take-over memory fix
 
 Image: `v0.6.0-31557ed1cef6` (`sha256:cbb4b3c66273e2965dd40a7227e7a5243db333fe250113fb3987462ad4f12588`), 82 patches, for two and three Sparks (v1.7.1's plus `0078`-`0083`). Every change below was also
