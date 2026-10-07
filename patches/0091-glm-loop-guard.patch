@@ -1,5 +1,5 @@
 # TF_GLM_LOOP_GUARD=1 ends a think block that has collapsed into repeating itself (issues #89 and #94; upstream
-# ashhart/TensorFold#204 added a guard for the Zig engine only). Per request, on the tokens the target committed, while
+# ashhart/TensorFold#210 proposed a guard for the Zig engine only, closed unmerged). Per request, on the tokens the target committed, while
 # the think block is open: an exact cycle of at most 16 tokens that held for 256 tokens ("maybe maybe maybe ..."), or
 # one token taking half of the last 256 (a block that is mostly "the"). The next round's tokens are then replaced by the
 # thinking budget's close (newline, </think>, blank line) through the same gate, so the model answers from there. Off by

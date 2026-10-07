@@ -5,6 +5,11 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **Anthropic Messages API** (patch `0084-anthropic-messages`, PR #90 by Eduardo Florencio, @eduffd): upstream TensorFold
+  v0.6.3's `/v1/messages` (also `/messages`, with `/count_tokens`) by evilpsycho42 and ashhart, with Jordi Posthumus's
+  request body reading, backported to v0.6.0; a tool_result's images ride the following user message (patch `0056`),
+  capacity refusals answer `overloaded_error`. Claude Code and the Anthropic SDKs talk to the server directly. Live
+  checks: `tools/anthropiccheck.py`.
 - **`TF_GLM_LOOP_GUARD=1`** (patch `0091-glm-loop-guard`, off by default; issues #89, #94): a think block that collapsed
   into repeating itself (an exact cycle of up to 16 tokens held for 256, or one token taking half of the last 256) is
   closed with the thinking budget's close, per request, and the model answers from there; `usage.tensorfold.loop_guard`
