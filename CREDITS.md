@@ -120,8 +120,11 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   (Apache 2.0) as a reference.
 - `0084-anthropic-messages`: TensorFold v0.6.3's Anthropic Messages API (commits 8cca6e3 and ba18743, merged as
   e9fade0, with ced6139's request framing) by [evilpsycho42](https://github.com/evilpsycho42) and
-  [ashhart](https://github.com/ashhart), backported to v0.6.0.
+  [ashhart](https://github.com/ashhart), and its request body reading (`server/request_body.py`, commit 977f2cc) by
+  Jordi Posthumus ([JordiPosthumus](https://github.com/JordiPosthumus)); backported to v0.6.0 by Eduardo Florencio
+  ([eduffd](https://github.com/eduffd)) in [PR #90](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/90).
 - `0085-glm-select-split-loop` (the split selection's last pass over the earlier chunks only): by
+  [BadAd84](https://github.com/BadAd84).
 - `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by
   [BadAd84](https://github.com/BadAd84).
 - `0087-glm-display-kv-dispram` (`DISPLAY_KV_BACKEND=dispram`: `0072`'s display reservation on kindling spark-os): by

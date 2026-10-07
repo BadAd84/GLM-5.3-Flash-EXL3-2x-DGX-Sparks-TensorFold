@@ -1,5 +1,6 @@
 # Backport of upstream TensorFold's Anthropic Messages API (commits 8cca6e3 and ba18743, merged as e9fade0, plus
-# ced6139's request framing, released in v0.6.3) by evilpsycho42 and ashhart, backported onto the pinned v0.6.0 by
+# ced6139's request framing, released in v0.6.3) by evilpsycho42 and ashhart, and 977f2cc's request_body.py by Jordi Posthumus
+# (JordiPosthumus), backported onto the pinned v0.6.0 by
 # MiaAI-Lab, Apache-2.0: Anthropic's /v1/messages (also /messages, with /count_tokens suffixes) on both servers,
 # translated to the same chat completion the OpenAI route serves — system prompts, text and image blocks,
 # tool_use / tool_result, thinking as reasoning_content, stop_sequences, output_config effort/format — with Anthropic
