@@ -5,6 +5,10 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **The drafter checks its candidate ids** (patch `0092-glm-draft-candidates-checked`, issue #80): an id outside the
+  vocabulary (a float's bits read as an id) is logged with its value and the rows are copied again once the device is
+  idle; only a second bad read fails, as before. A mitigation: the root cause of #80 is not yet found, and the log line
+  tells a late copy from a rank mismatch.
 - **Anthropic Messages API** (patch `0084-anthropic-messages`, PR #90 by Eduardo Florencio, @eduffd): upstream TensorFold
   v0.6.3's `/v1/messages` (also `/messages`, with `/count_tokens`) by evilpsycho42 and ashhart, with Jordi Posthumus's
   request body reading, backported to v0.6.0; a tool_result's images ride the following user message (patch `0056`),
