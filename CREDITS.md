@@ -148,6 +148,10 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   read, private file modes, a per-Spark weights fingerprint and naming a rank whose settings differ are those of the
   session tier of [JSpark3](https://github.com/jakejharris/jspark3) v2.0.1 by
   [jakejharris](https://github.com/jakejharris). The code is new.
+- `0089-glm-kept-state` (a byte budget for the kept states and a per-conversation quota, `TF_GLM_KEPT_BYTES_GIB` and
+  `TF_GLM_KEEP_PER_CHAT`): authored by Thomas Wade ([ThomasWadeZ](https://github.com/ThomasWadeZ)) in
+  [PR #65](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/65) (Apache 2.0); rebased
+  onto the current patches, with both limits off by default and their drops kept out of the spill tier, by MiaAI-Lab.
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or
   quote as context stays under TensorFold's licenses (Apache 2.0, and MIT for code written before v0.6.0; see

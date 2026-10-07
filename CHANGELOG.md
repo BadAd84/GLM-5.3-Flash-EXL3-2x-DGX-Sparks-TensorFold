@@ -49,6 +49,13 @@ Every change to this recipe, newest first. Each release names the image it serve
   through a kernel, as the pool's own moves there do). Authored by Robert Wojciechowski
   ([wojo](https://github.com/wojo), PR #78); credits in `NOTICE` and `CREDITS.md`.
   Numbers: README, "Spill tier".
+- **Kept-state limits** (patch `0089-glm-kept-state`; `TF_GLM_KEPT_BYTES_GIB`, `TF_GLM_KEEP_PER_CHAT`; both off by
+  default): a byte budget for the device memory the kept prompt states own outside the pool (past it the entry cap's
+  victim order drops states, rank 0 deciding, and freed blocks go back to the driver once 512 MB has piled up), and a
+  per-conversation quota of turn-boundary states, so one long chat cannot fill the entries alone. States dropped by
+  either limit are not written to the spill tier (`0088`). `/health` gains `kept_bytes`, `kept_bytes_cap` and
+  `kept_mix`. Authored by Thomas Wade ([ThomasWadeZ](https://github.com/ThomasWadeZ), PR #65); the PR's copy-over-cut
+  part is `0071` already and is not included.
 
 ## v1.8 (2026-10-06): pictures read once, quoted markers, capacity refusals, and the take-over memory fix
 
