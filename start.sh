@@ -466,15 +466,15 @@ done
 log "Server answered after $((SECONDS - start))s"
 
 # ---------------------------------------------------------------- 5. smoke test
-# Thinking off and greedy, so that a short reply has text (the model thinks first otherwise); no text fails the start.
+# Thinking off and greedy, so that a short reply has text (the model thinks first otherwise); no text, or one character repeated (a collapsed model: issues #76, #81, #86), fails the start.
 step 5 "Smoke test: one chat completion through $( (( TP == 2 )) && echo "both" || echo "all $TP") ranks"
 SERVED=$(served_name || echo "$SERVED_NAME")
 if smoke=$(curl -s --max-time 180 "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
              -d "{\"model\": \"$SERVED\", \"max_tokens\": 32, \"temperature\": 0, \"chat_template_kwargs\": {\"enable_thinking\": false}, \"messages\": [{\"role\": \"user\", \"content\": \"Reply with OK.\"}]}" |
-           python3 -c 'import json,sys; r = json.load(sys.stdin); c = r["choices"][0]["message"].get("content") or ""; assert c.strip(); print(repr(c.strip()[:40]) + ",", r["usage"]["completion_tokens"], "tokens,", r.get("tensorfold", {}).get("decode_s"), "s")' 2>/dev/null); then
+           python3 -c 'import json,sys; r = json.load(sys.stdin); c = r["choices"][0]["message"].get("content") or ""; assert c.strip(); assert len(c.strip()) < 8 or len(set(c.strip())) > 2, "one repeated character"; print(repr(c.strip()[:40]) + ",", r["usage"]["completion_tokens"], "tokens,", r.get("tensorfold", {}).get("decode_s"), "s")' 2>/dev/null); then
   log "OK: $smoke"
 else
-  fail "the smoke test request failed (no reply text); the ranks are still running"
+  fail "the smoke test request failed (no reply text, or one character repeated: the weights load but the model does not answer; see the README's Ablit weights); the ranks are still running"
 fi
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
