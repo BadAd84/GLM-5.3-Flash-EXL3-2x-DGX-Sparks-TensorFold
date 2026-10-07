@@ -246,6 +246,11 @@ export TF_GLM_L2PF="${TF_GLM_L2PF:-1}"
 # Together with TF_GLM_L2PF=1 and TF_ROCE_MAX_KB=512: one request's prose 49.68, code 61.49 (+2.7% / +3.3%); 4 at once
 # prose 74.8 -> 76.6, code 100.0 -> 102.7 tok/s in all (two boots each). Same bits. 0: TensorFold's 32-bit loads.
 export TF_GLM_EXL3_LOADS="${TF_GLM_EXL3_LOADS:-nc}"
+# The decode expert kernel's block launch order (patch 0090, by lukaszraczylo): 0 (default) the grid as launched, items
+# fastest; 1: the eight 128-column blocks of one k slice run together (contiguous trellis reads), then the items; 2: then
+# the matrices and splits. The same bits for every value; his single-stream gain for 1 is +2.2%, one tester, not yet
+# measured here. Not TF_GLM_EXL3_ORDER, which is patch 0020's prompt order (default on).
+export TF_GLM_EXL3_DEC_ORDER="${TF_GLM_EXL3_DEC_ORDER:-0}"
 # Conversations that share a system prompt reuse its prompt state (patch 0015): a 7.9k-token system prompt's second and
 # later chats prefill in 0.13 s instead of 4.24 s. Same replies. SHARED_PREFIX=0 turns it off.
 SHARED_PREFIX="${SHARED_PREFIX:-1}"
