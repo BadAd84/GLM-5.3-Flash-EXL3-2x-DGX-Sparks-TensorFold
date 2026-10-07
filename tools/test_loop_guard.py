@@ -1,4 +1,4 @@
-"""CPU-only test of patch 0084's loop guard with the real call_gate.generate_gated.
+"""CPU-only test of patch 0091's loop guard with the real call_gate.generate_gated.
 
   python3 -B tools/test_loop_guard.py --source-root /path/to/patched/src
 No Torch/CUDA, sockets or source writes. Replays token streams: a clean block, an exact cycle, a mostly-"the" block,

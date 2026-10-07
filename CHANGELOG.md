@@ -5,6 +5,12 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **`TF_GLM_LOOP_GUARD=1`** (patch `0091-glm-loop-guard`, off by default; issues #89, #94): a think block that collapsed
+  into repeating itself (an exact cycle of up to 16 tokens held for 256, or one token taking half of the last 256) is
+  closed with the thinking budget's close, per request, and the model answers from there; `usage.tensorfold.loop_guard`
+  counts it. Paraphrase loops still need `--thinking-budget`. CPU test: `tools/test_loop_guard.py`.
+- **The start's smoke test fails on one repeated character** (#76, #81, #86): a collapsed model that answers "!!!!" no
+  longer passes as OK.
 - **Long-context decode** (patch `0085-glm-select-split-loop`): the DSA indexer's split top-k selection
   (`select_split`, in `0029`'s segmented decode windows) ran its last pass as one `CP x 256` tile per chunk program,
   masked to the chunks before it. `CP` comes from the selection scratch, which `verify.py` sizes for the whole KV
