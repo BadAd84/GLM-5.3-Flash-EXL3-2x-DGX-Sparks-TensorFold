@@ -124,6 +124,11 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
 - `0085-glm-select-split-loop` (the split selection's last pass over the earlier chunks only): by
 - `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by
   [BadAd84](https://github.com/BadAd84).
+- `0084-glm-display-kv-dispram` (`DISPLAY_KV_BACKEND=dispram`: `0072`'s display reservation on kindling spark-os): by
+  [BadAd84](https://github.com/BadAd84). It maps the span through `dispram`, the display-carveout lender of
+  [kindling spark-os](https://github.com/kindlingai/kindling-spark-os) by Matt Mastracci (Kindling AI). Nothing of
+  dispram ships here: the ranks import the host's client (`python/dispram.py`, GPL-3.0 with a bundling exception)
+  mounted read-only at run time and talk to `dispramd` (AGPL-3.0) over its socket.
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or
   quote as context stays under TensorFold's licenses (Apache 2.0, and MIT for code written before v0.6.0; see

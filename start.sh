@@ -71,8 +71,15 @@ for v in SPLIT SHARED_PREFIX KDA_CHUNKED COPY_CODE MULTI_PREFILL STREAM_SMOOTH; 
 [[ "$DISPLAY_KV_MIB" =~ ^(0|[1-9][0-9]{0,3})$ ]] && (( DISPLAY_KV_MIB % 16 == 0 && DISPLAY_KV_MIB <= 2032 )) ||
   die "DISPLAY_KV_MIB is a multiple of 16 from 0 to 2032, not $DISPLAY_KV_MIB"
 (( DISPLAY_KV_MIB == 0 || PARALLEL > 1 )) || die "DISPLAY_KV_MIB adds to the shared pool, which needs PARALLEL above 1"
-(( DISPLAY_KV_MIB == 0 )) || [[ -e /dev/dri/card0 ]] || die "DISPLAY_KV_MIB needs /dev/dri/card0, which this Spark lacks"
-if (( DISPLAY_KV_MIB )); then        # headless only: a monitor's framebuffer lives in the reservation
+[[ "$DISPLAY_KV_BACKEND" == drm || "$DISPLAY_KV_BACKEND" == dispram ]] ||
+  die "DISPLAY_KV_BACKEND is drm or dispram, not $DISPLAY_KV_BACKEND"
+if (( DISPLAY_KV_MIB )) && [[ "$DISPLAY_KV_BACKEND" == dispram ]]; then
+  # kindling spark-os: dispramd owns the reservation (its nvidia_drm has no dumb buffers); every rank gets its socket
+  # and python client (RUN_ARGS below), and the rank fails closed without them
+  [[ -S /run/dispram/dispram.sock ]] || die "DISPLAY_KV_BACKEND=dispram needs dispramd (/run/dispram/dispram.sock), which this Spark lacks"
+  [[ -d /opt/kindling/dispram/python ]] || die "DISPLAY_KV_BACKEND=dispram needs the dispram client (/opt/kindling/dispram/python)"
+elif (( DISPLAY_KV_MIB )); then        # headless only: a monitor's framebuffer lives in the reservation
+  [[ -e /dev/dri/card0 ]] || die "DISPLAY_KV_MIB needs /dev/dri/card0, which this Spark lacks"
   # no outputs under card0 at all: nvidia_drm runs without modeset, which has no dumb buffers for the span
   compgen -G '/sys/class/drm/card0-*/status' >/dev/null ||
     die "DISPLAY_KV_MIB needs nvidia_drm with modeset=1, and card0 shows no display outputs (an /etc/modprobe.d file may set modeset=0); set it to 0"
@@ -301,6 +308,10 @@ env_args() {
 env_args
 RUN_ARGS=(--gpus all --ipc=host --network host --shm-size 16g --device /dev/infiniband --cap-add IPC_LOCK
           --ulimit memlock=-1 --ulimit stack=67108864)
+# DISPLAY_KV_BACKEND=dispram (patch 0084): dispramd's socket and its python client in every rank
+if (( DISPLAY_KV_MIB )) && [[ "$DISPLAY_KV_BACKEND" == dispram ]]; then
+  RUN_ARGS+=(-v /run/dispram:/run/dispram -v /opt/kindling/dispram/python:/opt/dispram:ro -e PYTHONPATH=/opt/dispram)
+fi
 
 # ---------------------------------------------------------------- 3. launch, 4. load (a second try when the window does not fit)
 # No token goes into the containers: the ranks read only the local cache (HF_HUB_OFFLINE=1), and with HF_HUB_OFFLINE=0
