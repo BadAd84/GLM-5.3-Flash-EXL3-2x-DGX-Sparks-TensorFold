@@ -225,6 +225,14 @@ export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
 # no load balancer in front of it should set a small value (ours: 0, in scripts/local.sh).
 MAX_QUEUED="${MAX_QUEUED:-}"
 export TF_GLM_MAX_QUEUED="$MAX_QUEUED"
+# Sampled decode with the checkpoint's defaults (temperature 1, top_p 0.95, top_k 0) draws from the top_p nucleus
+# (patch 0034). Stock TensorFold tests each rank's candidates alone, which fails on any two ranks whenever both hold
+# part of the nucleus, so every such step gathered and sorted the whole vocabulary on the CPU: ~15 tok/s against
+# greedy's ~58 on two Sparks (issue #91). NUCLEUS_UNION=1 (the default) tests the ranks' candidates together: the
+# same nucleus and the same draw (the merged walk stops above every partial rank's last candidate, so no unsent token
+# can be in it; tools/test_nucleus_union.py compares both paths), 42-61 tok/s. A step whose nucleus is still wider
+# makes one extra 16,384-candidate gather before the whole shards. 0: stock behaviour. Every rank gets the same value.
+export TENSORFOLD_NUCLEUS_UNION="${NUCLEUS_UNION:-${TENSORFOLD_NUCLEUS_UNION:-1}}"
 # Waiting prompts filled together in one forward (patch 0049): shared work (expert weights, glue, projections) runs once
 # for every waiting prompt, attention per prompt on its own state, so each gets the bits it gets alone. sparkDash, prose at
 # 4 at once: 103.4 -> 108.8 tok/s, time to first token 590 -> 340 ms; structured at 3 / 4 at once: 175.2 -> 196.3 and
