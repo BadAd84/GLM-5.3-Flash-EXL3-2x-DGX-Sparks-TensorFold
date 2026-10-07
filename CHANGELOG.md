@@ -5,6 +5,26 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **Chunked request bodies** (patch `0094-chunked-request-bodies`, issues #67 and #74): a `Transfer-Encoding: chunked`
+  request (AI SDK clients, Chatbox, proxies) has no `Content-Length`, so v0.6.0 read it as an empty body ("messages
+  must be a list" 400) and parsed the unread chunks as the next request on the keep-alive connection (the stdlib
+  answers that in HTTP/0.9 mode: an HTML error page with no status line). The chat, completions, tokenizer and
+  Responses routes, the MLX-style server and the 404 path now read bodies through `request_body.read_body`, the reader
+  patch `0084` brings from upstream TensorFold's 977f2cc by Jordi Posthumus (@JordiPosthumus); each route keeps its
+  own limit (96 MiB for chat). A body with both `Content-Length` and `Transfer-Encoding`, or another transfer coding,
+  is now a 400 with the connection closed. CPU test: `tools/test_chunked_bodies.py` (`--source-root` the patched
+  `src`; `--expect-stock` shows the failure on the unpatched source).
+- **Streamed requests are refused at saturation** (patch `0095-stream-admission`, issue #50): with `TF_GLM_MAX_QUEUED`
+  set, a streamed request to a full server is answered 429 + `Retry-After: 5` before the stream opens; `0082` checked
+  inside `submit`, after the 200 and headers had gone out, so streaming clients saw 200 and an error event. A request
+  admitted between the check and `submit` still gets the old error event. CPU test: `tools/test_stream_admission.py`.
+- **Responses `include`** (patch `0093-responses-include`, issue #73): `/v1/responses` accepts OpenAI's `include`
+  values and ignores them (once logged per value); an unknown value or a non-list is still a 400. CPU test:
+  `tools/test_responses_include.py`.
+- **Default sampling at greedy's pace** (issue #91): `scripts/config.sh` now sets `TENSORFOLD_NUCLEUS_UNION=1`
+  (patch `0034`; `NUCLEUS_UNION=0` restores stock). The merged nucleus test gives the same draws; stock sent almost
+  every sampled step to a whole-vocabulary CPU sort (~15 tok/s against greedy's ~58). CPU test:
+  `tools/test_nucleus_union.py`. To measure on the Sparks: sampled against greedy tok/s on 2 and 3 Sparks.
 - **The drafter checks its candidate ids** (patch `0092-glm-draft-candidates-checked`, issue #80): an id outside the
   vocabulary (a float's bits read as an id) is logged with its value and the rows are copied again once the device is
   idle; only a second bad read fails, as before. A mitigation: the root cause of #80 is not yet found, and the log line

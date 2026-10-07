@@ -123,6 +123,10 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   [ashhart](https://github.com/ashhart), and its request body reading (`server/request_body.py`, commit 977f2cc) by
   Jordi Posthumus ([JordiPosthumus](https://github.com/JordiPosthumus)); backported to v0.6.0 by Eduardo Florencio
   ([eduffd](https://github.com/eduffd)) in [PR #90](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/90).
+- `0094-chunked-request-bodies` (chunked request bodies on the chat, completions, tokenizer and Responses routes and the
+  MLX-style server, issues #67, #74): uses the reader `tensorfold/server/request_body.py` (`read_body`, TensorFold
+  commit 977f2cc), authored by Jordi Posthumus ([JordiPosthumus](https://github.com/JordiPosthumus)) and brought in by
+  `0084`; the call sites are ours. TensorFold's own chunked-body issue is ashhart/TensorFold#244.
 - `0085-glm-select-split-loop` (the split selection's last pass over the earlier chunks only): by
   [BadAd84](https://github.com/BadAd84).
 - `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by

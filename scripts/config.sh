@@ -224,6 +224,7 @@ export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
 # queues as every scheduler always has; 0 refuses anything past the lanes. A single-instance deployment with
 # no load balancer in front of it should set a small value (ours: 0, in scripts/local.sh).
 MAX_QUEUED="${MAX_QUEUED:-}"
+# A streamed request is checked before its 200 goes out (patch 0095), so it gets the same 429 + Retry-After.
 export TF_GLM_MAX_QUEUED="$MAX_QUEUED"
 # Sampled decode with the checkpoint's defaults (temperature 1, top_p 0.95, top_k 0) draws from the top_p nucleus
 # (patch 0034). Stock TensorFold tests each rank's candidates alone, which fails on any two ranks whenever both hold
