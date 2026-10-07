@@ -20,10 +20,10 @@ class HarnessTests(unittest.TestCase):
     def test_any_model_id_is_accepted(self):
         class Stop(Exception):
             pass
-        with patch.object(b,'get_health',side_effect=Stop):
+        with patch.object(b,'get_health',side_effect=Stop), patch.object(b,'MODEL',None), patch.object(b,'BASE',b.BASE), patch.object(b,'HEALTH',b.HEALTH):
             with self.assertRaises(Stop):
                 b.main(['--model','some-other-served-name'])
-        self.assertEqual(b.MODEL,'some-other-served-name')
+            self.assertEqual(b.MODEL,'some-other-served-name')
 
     def test_model_is_required(self):
         with patch.object(b.opener,'open') as request:
