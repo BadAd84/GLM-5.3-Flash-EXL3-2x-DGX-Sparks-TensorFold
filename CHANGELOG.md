@@ -3,6 +3,16 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
+  while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
+  half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at
+  most `TF_GLM_PREFILL_ROWS`): the same memory, the same replies, half the passes over the expert weights. Three
+  Sparks, `PARALLEL=4`, a 35k-token reply streaming meanwhile: a warm +20k turn on a 596k conversation 15.6-15.7 ->
+  14.0-14.1 s, a cold ~256k prompt 132.2-132.6 -> 113.4-114.0 s; the reply's gaps during the fill median 13-15 /
+  p99 20-25 / max 25-67 ms either way. `FILL_ROWS=1024` restores the old size. CPU check: `tools/fill_rows_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
