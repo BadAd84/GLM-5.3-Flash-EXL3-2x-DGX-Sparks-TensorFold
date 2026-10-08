@@ -3,6 +3,43 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
+
+Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
+Sparks: with defaults, the rail probe keeps both rails (`roceP2p1s0f1 <-> roceP2p1s0f1 ... used`, the Link line names
+2 rails), the smoke test and `tools/toolcheck.py` pass. Switching effort or thinking mid-conversation on a ~19.7k-token
+history, `cached_tokens`: flag off high->low, high->off, off->high 0%, same mode 100%; `TF_GLM_EFFORT_TAIL=1` 99-100% for
+every switch, `toolcheck` passes, and effort still sets the reasoning length (4 questions, low / high / max: 388 / 769 /
+1,720 completion tokens, all answers correct). `TF_GLM_CACHE_SHARE_PCT=25` starts with the estimate unchanged (88.09 GiB)
+and logs its count (32: each state reserves ~91 MiB of a ~7.5 GiB budget here).
+
+- **A second rail is tested before it is used (#66).** At two Sparks the launcher added the cabled port's PCIe twin by name
+  (v1.6) without checking that it reaches the peer; a twin that is up with a GID but unaddressed, on another subnet or at another
+  MTU ended in `vendor_err 0x81` (transport retry exceeded) in the first all-gather. `start.sh` now sends a full-size
+  unfragmentable ping from each second rail's own address to the peer's matching rail, both ways, and drops a rail that does not
+  answer with a `WARN` naming both devices, addresses and MTUs (one rail then, as `NCCL_RAILS=1`). The Link line also prints the
+  GID indexes and the rail count passed to `NCCL_IB_HCA` / `TF_ROCE_HCA` (#88). TP=3/4 and the ring are unchanged (they pair
+  devices by subnet). Scripts only, no patch.
+- **Effort line at the tail, opt-in** (patch `0096-effort-tail`, issue #93, reported and measured by jdecker76
+  ([@jdecker76](https://github.com/jdecker76))): the checkpoint's template renders `<|system|>Reasoning Effort: X` at token
+  3, so a conversation that switches effort or thinking on/off missed the kept prompt entirely (0% cached on ~26k tokens)
+  and prefilled again. `TF_GLM_EFFORT_TAIL=1` renders the line just before `<|assistant|><think>` instead (thinking off
+  has none, as before); the reporter's emulation kept 98 to 99% cached across max, low and off. Off by default and then
+  byte-identical to before: the model saw the line first in training, so run the quality A/B in the README before relying
+  on it. `GlmTokenizer` and the CUDA server's template both honour it, and every rank reads it with the other `TF_GLM_*`
+  switches. CPU test: `tools/test_effort_tail.py` (`--source-root` the patched `src`; `--expect-stock` shows the
+  difference on the unpatched source).
+- **Kept-state count follows a share of the pool** (patch `0097-glm-kept-entries-share`, issue #84, diagnosed by
+  @jdecker76): `TF_GLM_CACHE_ENTRIES` (32) is a count, but each kept state is a reservation (~91 MiB measured on two Sparks; KDA recurrent
+  state, conv window, DFlash2 window copy; flat in the context length) taken from the pool's budget, so finished
+  one-shot conversations pushed live ones out with millions of pool tokens free. `TF_GLM_CACHE_SHARE_PCT` (default 0:
+  off) makes the count at least that share of the budget (on two Sparks at the defaults the budget is ~7.5 GiB and 32 states already take ~38%, so
+  50 gives ~42 states and the 75% ceiling ~63); the same count sizes the reservation, so the
+  start-up estimate is unchanged and the pool shrinks by it. Any count is cut to three quarters of the budget, logged
+  (past it the states would own memory the estimate never counted). Every admission also rebuilt an int64 array of
+  every kept state's ids to find shared prefixes (112 ms for 32 states of 200k tokens): built once per state now.
+  Check: `tools/kept_cap_check.py`.
+
 ## v1.9.1 (2026-10-08): the spill tier's free-disk floor makes room
 
 Image: `v0.6.0-ff5dffc865d3` (`sha256:20275b2be818635a9c711d80a177477488d2c75cad373cc644422295c4fe9f07`), 94 patches (v1.9's, with `0088` updated). Tested live on two Sparks: with

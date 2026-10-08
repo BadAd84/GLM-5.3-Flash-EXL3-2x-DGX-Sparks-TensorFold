@@ -79,8 +79,8 @@ GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-ten
 # cannot) while patches/*.patch and IMAGE_EXTRAS still hash to IMAGE_TAG's hash. Other patches pull
 # $GHCR_IMAGE:<TF_VERSION>-<hash> when one is published, else build locally. scripts/publish-image.sh prints both.
 # The same image serves two and three Sparks.
-IMAGE_TAG="${IMAGE_TAG:-v0.6.0-ff5dffc865d3}"
-IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:20275b2be818635a9c711d80a177477488d2c75cad373cc644422295c4fe9f07}"
+IMAGE_TAG="${IMAGE_TAG:-v0.6.0-a1897d591f70}"
+IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f}"
 # the registry reference prepare.sh pulls for these patches: the pinned digest, or the hash's tag
 prebuilt_image() {
   local tag="${TF_VERSION}-$(image_hash)"
@@ -207,6 +207,13 @@ fi
 # or four alternating conversations push each other out (issue #17). Each entry reserves its fixed state (~45 MiB) at
 # start: 32 takes ~1 GiB more than 8.
 export TF_GLM_CACHE_ENTRIES="${TF_GLM_CACHE_ENTRIES:-32}"
+# TF_GLM_CACHE_SHARE_PCT (patch 0097, off by default; issue #84 by @jdecker76): the count above is also a memory
+# reservation (the pool shrinks by each entry's fixed state, ~91 MiB measured on two Sparks at the defaults; the
+# estimate is unchanged), so a pool with millions of free tokens
+# can still evict a live conversation at the 33rd state. A share makes the count at least that part of KV_POOL_GIB's
+# budget (~7.5 GiB on two Sparks at the defaults, where 32 states already take ~38%: 50 is ~42 states, 75 ~63). Any count is cut to 75% of the budget, logged at start. Watch
+# /health kept_prompts against pool_free_tokens: kept_prompts pinned at the count with a free pool is this symptom.
+export TF_GLM_CACHE_SHARE_PCT="${TF_GLM_CACHE_SHARE_PCT:-0}"
 # Two more limits on the kept states (patch 0089, both off by default; PR #65 by Thomas Wade): TF_GLM_KEPT_BYTES_GIB
 # caps the device memory the kept states own outside the pool (their DFlash2 window copies and recurrent state, ~45 MiB
 # each without a window, hundreds of MB with long ones), together: 0 is no cap, 4 is the author's value; past it the
@@ -219,6 +226,13 @@ export TF_GLM_KEEP_PER_CHAT="${TF_GLM_KEEP_PER_CHAT:-0}"
 # Earlier turns keep their reasoning in the prompt (patch 0060), as in zai-org's current template. 1: drop it, as the
 # checkpoint's template does; agents then prefill the previous turn's tool loop again at each new user message.
 export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
+# The reasoning-effort line ("<|system|>Reasoning Effort: Max") is token 3 of the checkpoint's prompt, so switching effort
+# or thinking on/off changes the whole prompt and misses the kept-prompt cache (issue #93, by jdecker76). 1 (patch 0096):
+# render it at the tail instead, just before "<|assistant|><think>", so the conversation stays identical across the
+# switches (thinking off has no line, as before). Off by default: it moves a line the model was trained to see first, so
+# check the effort levels still answer differently (tools/toolcheck.py, tools/end_of_turn.py) before relying on it.
+# Not a request field: it changes every thinking-on prompt, and every rank reads it with the other TF_GLM_* switches.
+export TF_GLM_EFFORT_TAIL="${TF_GLM_EFFORT_TAIL:-0}"
 # Admission at saturation (patch 0075): past the lanes plus MAX_QUEUED a foreground request is refused with
 # 429 + Retry-After (529 overloaded_error through the Anthropic bridge) instead of queueing invisibly. Unset
 # queues as every scheduler always has; 0 refuses anything past the lanes. A single-instance deployment with
