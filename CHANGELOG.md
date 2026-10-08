@@ -3,7 +3,15 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
-## Unreleased
+## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
+
+Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
+Sparks: with defaults, the rail probe keeps both rails (`roceP2p1s0f1 <-> roceP2p1s0f1 ... used`, the Link line names
+2 rails), the smoke test and `tools/toolcheck.py` pass. Switching effort or thinking mid-conversation on a ~19.7k-token
+history, `cached_tokens`: flag off high->low, high->off, off->high 0%, same mode 100%; `TF_GLM_EFFORT_TAIL=1` 99-100% for
+every switch, `toolcheck` passes, and effort still sets the reasoning length (4 questions, low / high / max: 388 / 769 /
+1,720 completion tokens, all answers correct). `TF_GLM_CACHE_SHARE_PCT=25` starts with the estimate unchanged (88.09 GiB)
+and logs its count (32: each state reserves ~91 MiB of a ~7.5 GiB budget here).
 
 - **A second rail is tested before it is used (#66).** At two Sparks the launcher added the cabled port's PCIe twin by name
   (v1.6) without checking that it reaches the peer; a twin that is up with a GID but unaddressed, on another subnet or at another
