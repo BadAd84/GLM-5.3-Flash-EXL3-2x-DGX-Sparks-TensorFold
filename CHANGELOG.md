@@ -3,6 +3,20 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A decode window's indexer, twice as fast with four agents** (patch `0107-glm-decode-indexer`, by [BadAd84](https://github.com/BadAd84)):
+  the same tokens and counts in less time. (1) The Triton scoring's grid is 512 programs a segment (was
+  256). (2) Segments of 4 or more rows are scored by `seg_scores.cu`, which stores `_seg_scores`' scores
+  with patch 0105's instruction sequence (the same bits under Triton 3.7) while a CTA converts each FP8 key tile once for up to 8 of the
+  segment's rows; fewer rows stay on Triton (memory-bound there). (3) Windows of 8 or more rows select
+  each row's pools by `_seg_select_floor`, one pass over its scores (patch 0101's method), instead of
+  `select_split`'s five. The indexer call on one GB10, 4 streams x 8 rows at 596k: 1,296 -> 647 us
+  (x11 layers a round); 1 x 16 rows 635 -> 344 us. Live on three Sparks with four agents at ~596k, every
+  stream's round -2 to -4%. Under another Triton release (`sparse.TRITON_PTX`), or when the build fails, the
+  Triton scoring serves (logged once). `TF_GLM_SEG_SCORES_CUDA=0` / `TF_GLM_SEG_SELECT_FLOOR=0`: the old scoring /
+  selection. Applies after `0101`, `0105` and `0106`. GPU check: `tools/decode_indexer_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
