@@ -174,9 +174,10 @@ rail_info() {
   echo "- - -"
 }
 
-# rail_ping <local address> <peer address> <MTU>: one rail's traffic reaches the peer's twin - a full-size, unfragmentable
-# ping from that rail's own address (-I), so an unaddressed, differently-subnetted or smaller-MTU twin fails here
-# instead of as vendor_err 0x81 (transport retry exceeded) in the first all-gather (issue #66). Self-contained, like rail_info.
+# rail_ping <local netdev> <peer address> <MTU>: one rail's traffic reaches the peer's twin - a full-size, unfragmentable
+# ping bound to that rail's own port (-I <netdev>: an address alone would be routed out of whichever port of the same
+# subnet the kernel picks, usually the cabled one), so an unaddressed, differently-subnetted or smaller-MTU twin fails
+# here instead of as vendor_err 0x81 (transport retry exceeded) in the first all-gather (issue #66). Self-contained.
 rail_ping() { ping -c2 -W2 -I "$1" -M do -s $(( $3 - 28 )) "$2" >/dev/null 2>&1; }
 
 # The same function on worker i (its definition is sent over ssh).
@@ -219,18 +220,18 @@ cx7_peer() {
 # lists with a warning (the first device, the link itself, is never probed: the launcher reached the worker over it).
 probe_rails() {
   local -a h w keep_h=() keep_w=()
-  local k hip hmtu wip wmtu mtu=0 ok
+  local k hdev hip hmtu wdev wip wmtu mtu=0 ok
   IFS=, read -ra h <<<"$HEAD_HCAS"; IFS=, read -ra w <<<"$WORKER_HCAS"
   (( ${#h[@]} > 1 && ${#h[@]} == ${#w[@]} )) || return 0
   [[ -z "${WORKER_DOWN[1]:-}" ]] || { warn "DRY_RUN: the second rail ($HEAD_HCAS / $WORKER_HCAS) is not probed: the worker cannot be reached"; return 0; }
   keep_h=("${h[0]}"); keep_w=("${w[0]}")
   for (( k = 1; k < ${#h[@]}; k++ )); do
-    read -r _ hip hmtu <<<"$(rail_info "${h[k]}")"
-    read -r _ wip wmtu <<<"$(worker 1 "$(declare -f rail_info); rail_info ${w[k]}")"
+    read -r hdev hip hmtu <<<"$(rail_info "${h[k]}")"
+    read -r wdev wip wmtu <<<"$(worker 1 "$(declare -f rail_info); rail_info ${w[k]}")"
     ok=0
     if [[ "$hip" =~ ^[0-9.]+$ && "$wip" =~ ^[0-9.]+$ && "$hmtu" =~ ^[0-9]+$ && "$wmtu" =~ ^[0-9]+$ ]]; then
       mtu=$(( hmtu < wmtu ? hmtu : wmtu ))
-      if rail_ping "$hip" "$wip" "$mtu" && worker 1 "$(declare -f rail_ping); rail_ping $wip $hip $mtu"; then ok=1; fi
+      if rail_ping "$hdev" "$wip" "$mtu" && worker 1 "$(declare -f rail_ping); rail_ping $wdev $hip $mtu"; then ok=1; fi
     fi
     if (( ok )); then
       keep_h+=("${h[k]}"); keep_w+=("${w[k]}")
