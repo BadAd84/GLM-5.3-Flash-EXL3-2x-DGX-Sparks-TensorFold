@@ -3,6 +3,20 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **The next draft pass starts at a round's end** (patch `0100-glm-draft-prelaunch`, by
+  [BadAd84](https://github.com/BadAd84)): a decode round asked for its DFlash2 drafts only after rank 0 had emitted
+  the last round's tokens, planned the next round and sent its message, so the GPU sat idle meanwhile (an nsys
+  trace on three Sparks: 0.47 ms a round between the taps update and the message gather, 0.74 ms at 4 streams). Now
+  every rank launches the next round's block pass at the end of the round, from state every rank holds (never
+  rank 0's own stop decisions), and the next round waits for it when its streams, pending tokens and contexts
+  match (a context's every change bumps its generation), else runs its own pass. The same inputs give the same
+  candidates: every digest equal, drafted and serial alike. Three Sparks, `PARALLEL=4`: one stream's prose
+  66.8-67.0 -> 67.9-68.2 tok/s (38.0 -> 37.3 ms a round), code 88.8-91.1 -> 89.2-92.3 (overlapping), four at 596k
+  133.7-133.9 -> 134.7-134.9; `0092`'s check and retry is kept. `TF_GLM_DRAFT_PRELAUNCH=0` turns it off. GPU check:
+  `tools/draft_prelaunch_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two

@@ -134,6 +134,8 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   [BadAd84](https://github.com/BadAd84).
 - `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by
   [BadAd84](https://github.com/BadAd84).
+- `0100-glm-draft-prelaunch` (the next round's DFlash2 block pass launched at a decode round's end,
+  `TF_GLM_DRAFT_PRELAUNCH`): by [BadAd84](https://github.com/BadAd84).
 - `0087-glm-display-kv-dispram` (`DISPLAY_KV_BACKEND=dispram`: `0072`'s display reservation on kindling spark-os): by
   [BadAd84](https://github.com/BadAd84). It maps the span through `dispram`, the display-carveout lender of
   [kindling spark-os](https://github.com/kindlingai/kindling-spark-os) by Matt Mastracci (Kindling AI). Nothing of
