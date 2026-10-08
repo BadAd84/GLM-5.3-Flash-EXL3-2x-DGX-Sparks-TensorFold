@@ -553,7 +553,7 @@ Less common settings are described in `scripts/config.sh` and `scripts/nodes.sh`
 `TF_VERSION`, `TF_REPO`, `BASE_IMAGE` (the patches are made for TensorFold v0.6.0; after changing any of these run
 `scripts/prepare.sh --rebuild`), `IMAGE`, `CONTAINER_NAME`, `GHCR_IMAGE`, `HF_CACHE` (default `$HF_HOME` or
 `~/.cache/huggingface`), `KERNEL_CACHE`, `STATE_DIR`, `MIN_FREE_GB`, `IMAGE_FREE_GB`, `NCCL_RAILS` (`1`: one RoCE
-port even when the cabled port's two PCIe links, or a second port, are up), `NCCL_CHANNELS` (4), `NCCL_DEBUG`, `RSYNC_OPTS`. `start.sh` also takes `HF_HUB_OFFLINE=0` (let the
+port even when the cabled port's two PCIe links, or a second port, are up; at two Sparks `start.sh` pings each second rail across the link before using it and drops one that does not answer, with a warning), `NCCL_CHANNELS` (4), `NCCL_DEBUG`, `RSYNC_OPTS`. `start.sh` also takes `HF_HUB_OFFLINE=0` (let the
 server reach Hugging Face; by default it serves from the local cache only).
 
 ### Thinking and sampling

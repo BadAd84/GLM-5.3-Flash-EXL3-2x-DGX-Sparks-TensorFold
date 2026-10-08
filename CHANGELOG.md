@@ -3,6 +3,16 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A second rail is tested before it is used (#66).** At two Sparks the launcher added the cabled port's PCIe twin by name
+  (v1.6) without checking that it reaches the peer; a twin that is up with a GID but unaddressed, on another subnet or at another
+  MTU ended in `vendor_err 0x81` (transport retry exceeded) in the first all-gather. `start.sh` now sends a full-size
+  unfragmentable ping from each second rail's own address to the peer's matching rail, both ways, and drops a rail that does not
+  answer with a `WARN` naming both devices, addresses and MTUs (one rail then, as `NCCL_RAILS=1`). The Link line also prints the
+  GID indexes and the rail count passed to `NCCL_IB_HCA` / `TF_ROCE_HCA` (#88). TP=3/4 and the ring are unchanged (they pair
+  devices by subnet). Scripts only, no patch.
+
 ## v1.9.1 (2026-10-08): the spill tier's free-disk floor makes room
 
 Image: `v0.6.0-ff5dffc865d3` (`sha256:20275b2be818635a9c711d80a177477488d2c75cad373cc644422295c4fe9f07`), 94 patches (v1.9's, with `0088` updated). Tested live on two Sparks: with

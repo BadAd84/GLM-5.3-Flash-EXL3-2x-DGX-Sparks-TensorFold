@@ -229,7 +229,7 @@ docker run --rm --entrypoint python "$IMAGE" -c \
   if (( DRY )); then warn "DRY_RUN: tensorfold serve in $IMAGE rejects these arguments: $(tail -1 "$STATE_DIR/args.err")"
   else cat "$STATE_DIR/args.err" >&2; die "tensorfold serve rejects these arguments (see above); nothing was changed"; fi
 detect_links
-if (( TP == 2 )); then log "Link: $HEAD_ADDR ($HEAD_DEV) <-> $WORKER_ADDR ($WORKER_DEV), RoCE $HEAD_HCAS / $WORKER_HCAS"
+if (( TP == 2 )); then log "Link: $HEAD_ADDR ($HEAD_DEV) <-> $WORKER_ADDR ($WORKER_DEV), RoCE $HEAD_HCAS / $WORKER_HCAS (GID $HEAD_GID / $WORKER_GID; $(tr ',' '\n' <<<"$HEAD_HCAS" | wc -l) rail(s) -> NCCL_IB_HCA, TF_ROCE_HCA)"
 else
   log "Rendezvous: $MASTER_ADDR:$MASTER_PORT; NCCL bootstrap over ${NODE_DEV[*]} (rank 0 to $((TP - 1)))"
   for r in 0 $(worker_ids); do
