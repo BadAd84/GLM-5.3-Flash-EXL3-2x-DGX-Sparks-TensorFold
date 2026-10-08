@@ -3,6 +3,15 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A prompt chunk's dense projections on a faster tile** (patch `0102-glm-prompt-matmul-tile`, by [BadAd84](https://github.com/BadAd84)):
+  `forward.mm` launched every 4-bit prompt projection on the extension's default tile 0. It now launches
+  tile 9 (128 x 128 on four 64 x 64 warps, two blocks an SM) where K >= 1024 and the grid has 96 or more
+  blocks, else tile 3. A tile only picks which warp computes an output, so the bits are the same. A
+  2,048-row chunk's dense projections on one GB10: 178.1 -> 152.2 ms at TP=3 shapes, 238.1 -> 200.7 ms at
+  TP=2 shapes. `TF_GLM_PROMPT_TILE=0`: tile 0. GPU check: `tools/prompt_tile_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
