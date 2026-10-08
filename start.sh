@@ -96,6 +96,7 @@ DRY=0; [[ "${DRY_RUN:-0}" == 1 ]] && DRY=1
 [[ "$TF_GLM_MULTI_LONE" =~ ^[01]$ ]] || die "TF_GLM_MULTI_LONE is 0 or 1, not $TF_GLM_MULTI_LONE"
 [[ "$TF_GLM_MULTI_WINDOW" =~ ^(16|24|32|40|48|56|64)$ ]] || die "TF_GLM_MULTI_WINDOW is 16 to 64 rows in steps of 8, not $TF_GLM_MULTI_WINDOW"
 [[ "$TF_GLM_CLEAR_THINKING" =~ ^[01]$ ]] || die "TF_GLM_CLEAR_THINKING is 0 or 1, not $TF_GLM_CLEAR_THINKING"
+[[ "$TF_GLM_EFFORT_TAIL" =~ ^[01]$ ]] || die "TF_GLM_EFFORT_TAIL is 0 or 1, not $TF_GLM_EFFORT_TAIL"
 [[ "$TF_GLM_L2PF" =~ ^(0|off|1|bulk|lines|touch)$ ]] || die "TF_GLM_L2PF is 0, 1 (bulk), lines or touch, not $TF_GLM_L2PF"
 [[ "$TF_GLM_EXL3_LOADS" =~ ^(0|ldg|1|nc|nc1|nc2|nc4)$ ]] || die "TF_GLM_EXL3_LOADS is 0, nc, nc2 or nc4, not $TF_GLM_EXL3_LOADS"
 [[ "$TF_GLM_EXL3_DEC_ORDER" =~ ^[012]$ ]] || die "TF_GLM_EXL3_DEC_ORDER is 0, 1 or 2, not $TF_GLM_EXL3_DEC_ORDER"

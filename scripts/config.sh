@@ -219,6 +219,13 @@ export TF_GLM_KEEP_PER_CHAT="${TF_GLM_KEEP_PER_CHAT:-0}"
 # Earlier turns keep their reasoning in the prompt (patch 0060), as in zai-org's current template. 1: drop it, as the
 # checkpoint's template does; agents then prefill the previous turn's tool loop again at each new user message.
 export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
+# The reasoning-effort line ("<|system|>Reasoning Effort: Max") is token 3 of the checkpoint's prompt, so switching effort
+# or thinking on/off changes the whole prompt and misses the kept-prompt cache (issue #93, by jdecker76). 1 (patch 0096):
+# render it at the tail instead, just before "<|assistant|><think>", so the conversation stays identical across the
+# switches (thinking off has no line, as before). Off by default: it moves a line the model was trained to see first, so
+# check the effort levels still answer differently (tools/toolcheck.py, tools/end_of_turn.py) before relying on it.
+# Not a request field: it changes every thinking-on prompt, and every rank reads it with the other TF_GLM_* switches.
+export TF_GLM_EFFORT_TAIL="${TF_GLM_EFFORT_TAIL:-0}"
 # Admission at saturation (patch 0075): past the lanes plus MAX_QUEUED a foreground request is refused with
 # 429 + Retry-After (529 overloaded_error through the Anthropic bridge) instead of queueing invisibly. Unset
 # queues as every scheduler always has; 0 refuses anything past the lanes. A single-instance deployment with

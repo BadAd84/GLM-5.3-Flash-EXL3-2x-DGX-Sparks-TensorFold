@@ -3,6 +3,18 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **Effort line at the tail, opt-in** (patch `0096-effort-tail`, issue #93, reported and measured by jdecker76
+  ([@jdecker76](https://github.com/jdecker76))): the checkpoint's template renders `<|system|>Reasoning Effort: X` at token
+  3, so a conversation that switches effort or thinking on/off missed the kept prompt entirely (0% cached on ~26k tokens)
+  and prefilled again. `TF_GLM_EFFORT_TAIL=1` renders the line just before `<|assistant|><think>` instead (thinking off
+  has none, as before); the reporter's emulation kept 98 to 99% cached across max, low and off. Off by default and then
+  byte-identical to before: the model saw the line first in training, so run the quality A/B in the README before relying
+  on it. `GlmTokenizer` and the CUDA server's template both honour it, and every rank reads it with the other `TF_GLM_*`
+  switches. CPU test: `tools/test_effort_tail.py` (`--source-root` the patched `src`; `--expect-stock` shows the
+  difference on the unpatched source).
+
 ## v1.9.1 (2026-10-08): the spill tier's free-disk floor makes room
 
 Image: `v0.6.0-ff5dffc865d3` (`sha256:20275b2be818635a9c711d80a177477488d2c75cad373cc644422295c4fe9f07`), 94 patches (v1.9's, with `0088` updated). Tested live on two Sparks: with
