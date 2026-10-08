@@ -117,10 +117,10 @@ index 59d55e3..4f74b6f 100644
          server.server_close()
 diff --git tensorfold/cuda/spill.py tensorfold/cuda/spill.py
 new file mode 100644
-index 0000000..d69c880
+index 0000000..c7a8eb8
 --- /dev/null
 +++ tensorfold/cuda/spill.py
-@@ -0,0 +1,1235 @@
+@@ -0,0 +1,1239 @@
 +"""A disk tier for kept prompt states on CUDA engines (``tensorfold serve --spill-gib``): a state that leaves memory
 +is written to local disk and read back when a later request extends the same tokens, also after a restart.
 +
@@ -812,24 +812,26 @@ index 0000000..d69c880
 +                best = e
 +        return best
 +
-+    def _make_room(self, extra: int, keep: frozenset = frozenset()) -> bool:
-+        """Every rank alike: the least recently used entries go until ``extra`` more bytes fit the cap. The index alone
++    def _make_room(self, extra: int, keep: frozenset = frozenset(), cap: int | None = None) -> bool:
++        """Every rank alike: the least recently used entries go until ``extra`` more bytes fit the cap (or ``cap``, when
++        the free-disk floor asks for less). The index alone
 +        decides (an entry still being written here goes too, its writer then drops the file), so every rank drops the
 +        same entries whatever its own writes' progress. ``keep``'s entries stay (an early write's: copies of prompts
 +        still in memory, which would otherwise evict each other in turn under a small cap)."""
 +
 +        with self.lock:
++            cap = self.cap if cap is None else min(cap, self.cap)
 +            total = self._total() + extra
-+            if total > self.cap and extra + sum(e.size for e in self.index.values() if e.key in keep) > self.cap:
++            if total > cap and extra + sum(e.size for e in self.index.values() if e.key in keep) > cap:
 +                return False                       # it cannot fit beside ``keep``'s entries: nothing goes for it
-+            while total > self.cap:
++            while total > cap:
 +                old = [e for e in self.index.values() if e.key not in keep]
 +                if not old:
 +                    break
 +                victim = min(old, key=lambda e: (e.last, e.key))
 +                total -= victim.size
 +                self._delete(victim)
-+            return total <= self.cap
++            return total <= cap
 +
 +    def _throttle(self, size: int) -> None:
 +        """A queued write holds its tensors (from live rows, the caller's caches too) until it is on disk: past
@@ -1078,13 +1080,15 @@ index 0000000..d69c880
 +        header, data = _header(items, info)
 +        size = len(header) + data
 +        floor = int(self.cfg.min_free_gib * (1 << 30))
-+        ok = int(self.disk_free() - size >= floor)
++        with self.lock:                            # (writes still queued here count as written)
++            queued = sum(j.nbytes for j in self.pending.values() if not j.done.is_set())
++        short = max(0, floor + size + queued - self.disk_free())   # bytes this rank's disk would be below the floor
 +        if self.world > 1 and self.gather is not None:
-+            got = self.gather([ok, (size >> 20) + 1])
-+            ok = int(all(r[0] for r in got))
++            got = self.gather([-(-short >> 20), (size >> 20) + 1])
++            short = max(r[0] for r in got) << 20
 +            size = max(r[1] for r in got) << 20
-+        if not ok:
-+            self.stats.no_space += 1
++        if short and not self._make_room(size, keep, cap=self._total() + size - short):
++            self.stats.no_space += 1               # below the floor even with every entry outside ``keep`` gone
 +            return None
 +        if size > self.cap or not self._make_room(size, keep):   # (larger than the cap: nothing is evicted)
 +            self.stats.full += 1
@@ -1723,7 +1727,7 @@ index 2007e48..28336ea 100644
                    constraint, feed, shared)
          if hasattr(self.comm, "check"):
 diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
-index af9769e..100a1b7 100644
+index af9769e..ce427a1 100644
 --- tensorfold/families/glm5_next/cuda/multi.py
 +++ tensorfold/families/glm5_next/cuda/multi.py
 @@ -38,6 +38,7 @@ import hashlib
@@ -2119,10 +2123,10 @@ index af9769e..100a1b7 100644
 +                break
 +            self._emit(SPILL, [c.kid])
 +            keep = self._kept_keys() if keep is None else keep
-+            full = d.stats.full
++            refused = d.stats.full + d.stats.no_space
 +            if self._spill(c, keep=keep):
 +                d.stats.behind += 1
-+            elif d.stats.full > full:
++            elif d.stats.full + d.stats.no_space > refused:   # no room under the cap or above the free-disk floor
 +                skip.add(c.kid)
 +                continue
 +            covered += len(c.ids)

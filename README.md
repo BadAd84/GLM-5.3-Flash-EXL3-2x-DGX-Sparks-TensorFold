@@ -335,9 +335,9 @@ is dropped on every Spark and the prompt is prefilled. With `PARALLEL` above 1, 
 stored too, under their pictures' content: a request resumes one only with the same pictures in the same places.
 
 Files: one per stored prompt, about 6.7 KB a token a Spark (1.34 GB at 200k tokens), owned by you and readable only by
-you (they hold your prompts' tokens); the oldest go first
-past `SPILL_GIB`, and no write leaves less than `SPILL_MIN_FREE_GIB` (50) GiB free. Prompts under `SPILL_MIN_TOKENS`
-(8,192) are not written. Its counters are in `/health` (`spill`) and `/metrics`. Design and credits: `NOTICE`,
+you (they hold your prompts' tokens); the oldest go first past `SPILL_GIB`, and also when a write would leave less
+than `SPILL_MIN_FREE_GIB` (50) GiB free (if dropping old files cannot make that room, the write is skipped). Prompts
+under `SPILL_MIN_TOKENS` (8,192) are not written. Its counters are in `/health` (`spill`) and `/metrics`. Design and credits: `NOTICE`,
 `CREDITS.md`; the tier's core (`tensorfold/cuda/spill.py`) is model-agnostic and is offered to TensorFold itself.
 
 ## Worker weights over NFS
