@@ -5,7 +5,7 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## v1.9 (2026-10-08): the Anthropic Messages API, long-context speed, a spill tier, a loop guard and protocol fixes
 
-Image: `v0.6.0-bd91ecd14811`, 94 patches, for two and three Sparks (v1.8's plus `0084`-`0095`). Tested live on two
+Image: `v0.6.0-bd91ecd14811` (`sha256:43a8e61cbd4288a07e69cb8677c40faa187d93f3a748111f51064f9e9f23e828`), 94 patches, for two and three Sparks (v1.8's plus `0084`-`0095`). Tested live on two
 Sparks before release: the smoke test, `tools/anthropiccheck.py` (all ok, chunked bodies included),
 `tools/toolcheck.py`, a chunked `/v1/chat/completions` body, `/v1/responses` with `include`, the 400 framing on a
 kept-alive connection, and default sampling at greedy's speed (512 tokens, thinking off: 44.1 tok/s greedy, 43.5
