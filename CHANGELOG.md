@@ -3,6 +3,15 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **Three-Spark decode attention in one wave** (patch `0104-glm-seg-attention-tp3-tiles`, by [BadAd84](https://github.com/BadAd84)):
+  `seg_head_block` gave 32-head tiles from 8 rows, sized for two Sparks' 32 heads a rank. At three Sparks
+  (22 / 21 heads) the 16-head tiles are two programs a row and chunk, so from 5 rows they pass the GB10's
+  48 SMs and run in two waves. A rank of 17 to 24 heads now takes 32-head tiles from 5 rows; 16 and 32 heads
+  keep 8. The chunk pass at 5 / 6 / 7 rows on one GB10: 92.4 / 103.3 / 108.1 -> 65.3 / 65.9 / 66.4 us a
+  call; the same bits. GPU check: `tools/seg_head_block_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
