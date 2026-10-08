@@ -22,10 +22,11 @@ Every change to this recipe, newest first. Each release names the image it serve
   switches. CPU test: `tools/test_effort_tail.py` (`--source-root` the patched `src`; `--expect-stock` shows the
   difference on the unpatched source).
 - **Kept-state count follows a share of the pool** (patch `0097-glm-kept-entries-share`, issue #84, diagnosed by
-  @jdecker76): `TF_GLM_CACHE_ENTRIES` (32) is a count, but each kept state is a reservation of ~45 MiB (KDA recurrent
+  @jdecker76): `TF_GLM_CACHE_ENTRIES` (32) is a count, but each kept state is a reservation (~91 MiB measured on two Sparks; KDA recurrent
   state, conv window, DFlash2 window copy; flat in the context length) taken from the pool's budget, so finished
   one-shot conversations pushed live ones out with millions of pool tokens free. `TF_GLM_CACHE_SHARE_PCT` (default 0:
-  off) makes the count at least that share of the budget (25: 71 states); the same count sizes the reservation, so the
+  off) makes the count at least that share of the budget (on two Sparks at the defaults the budget is ~7.5 GiB and 32 states already take ~38%, so
+  50 gives ~42 states and the 75% ceiling ~63); the same count sizes the reservation, so the
   start-up estimate is unchanged and the pool shrinks by it. Any count is cut to three quarters of the budget, logged
   (past it the states would own memory the estimate never counted). Every admission also rebuilt an int64 array of
   every kept state's ids to find shared prefixes (112 ms for 32 states of 200k tokens): built once per state now.

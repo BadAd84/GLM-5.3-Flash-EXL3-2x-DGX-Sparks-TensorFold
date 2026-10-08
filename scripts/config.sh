@@ -208,9 +208,10 @@ fi
 # start: 32 takes ~1 GiB more than 8.
 export TF_GLM_CACHE_ENTRIES="${TF_GLM_CACHE_ENTRIES:-32}"
 # TF_GLM_CACHE_SHARE_PCT (patch 0097, off by default; issue #84 by @jdecker76): the count above is also a memory
-# reservation (the pool shrinks by ~45 MiB an entry; the estimate is unchanged), so a pool with millions of free tokens
+# reservation (the pool shrinks by each entry's fixed state, ~91 MiB measured on two Sparks at the defaults; the
+# estimate is unchanged), so a pool with millions of free tokens
 # can still evict a live conversation at the 33rd state. A share makes the count at least that part of KV_POOL_GIB's
-# budget: 25 is 71 states, ~3.1 GiB of the 12.5. Any count is cut to 75% of the budget, logged at start. Watch
+# budget (~7.5 GiB on two Sparks at the defaults, where 32 states already take ~38%: 50 is ~42 states, 75 ~63). Any count is cut to 75% of the budget, logged at start. Watch
 # /health kept_prompts against pool_free_tokens: kept_prompts pinned at the count with a free pool is this symptom.
 export TF_GLM_CACHE_SHARE_PCT="${TF_GLM_CACHE_SHARE_PCT:-0}"
 # Two more limits on the kept states (patch 0089, both off by default; PR #65 by Thomas Wade): TF_GLM_KEPT_BYTES_GIB
