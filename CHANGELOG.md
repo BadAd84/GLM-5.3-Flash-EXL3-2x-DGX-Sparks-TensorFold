@@ -3,6 +3,20 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **No stall at a long request's start** (patch `0099-glm-tokenize-nogil`, by [BadAd84](https://github.com/BadAd84)):
+  the server tokenized each prompt with the tokenizer's `encode`, which holds Python's GIL for the whole text (~1.2
+  us a token), so while a long prompt was being tokenized the engine loop, and every other stream with it, stopped:
+  ~270 ms at 226k tokens and 725-768 ms at a ~619k-token agent turn (a second stream's longest gap, three Sparks).
+  Every tokenizer call in the server now goes through one helper that uses `encode_batch_fast` on the one text:
+  the same ids (`tools/tokenize_check.py`: real code and prose files, filler, every added token, random Unicode,
+  edge cases, both `add_special_tokens` values, and no `encode` call left in `server.py`), the GIL released (a
+  counting thread keeps 93-99% of its rate, against ~1% under `encode`) and ~30% faster (689k tokens: 799-825 ms
+  -> 559-593 ms). Requests with pictures or clips (`GlmVision.prepare`) tokenize the same way: the same ids, picture
+  positions and content hash (`tools/vision_tokenize_check.py`), and a counting thread's longest gap at ~784k tokens
+  749 -> 8 ms.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
