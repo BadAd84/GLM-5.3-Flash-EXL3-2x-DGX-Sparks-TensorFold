@@ -9,7 +9,10 @@ Image: `v0.6.0-bd91ecd14811`, 94 patches, for two and three Sparks (v1.8's plus 
 Sparks before release: the smoke test, `tools/anthropiccheck.py` (all ok, chunked bodies included),
 `tools/toolcheck.py`, a chunked `/v1/chat/completions` body, `/v1/responses` with `include`, the 400 framing on a
 kept-alive connection, and default sampling at greedy's speed (512 tokens, thinking off: 44.1 tok/s greedy, 43.5
-sampled at temperature 1, top_p 0.95). The new switches are off by default (`TF_GLM_LOOP_GUARD`, `SPILL_GIB`,
+sampled at temperature 1, top_p 0.95), needles at 194,851 and 502,691 tokens correct (prefill 111.2 s and 333.7 s),
+`tools/end_of_turn.py` 4 of 48 cut, and in the image `tools/select_split_check.py` and `tools/scores_loop_check.py`
+(0085, 0086: all pass), `tools/display_kv_check.py`, `tools/kept_state_check.py` and `tools/pool_room_check.py`.
+The new switches are off by default (`TF_GLM_LOOP_GUARD`, `SPILL_GIB`,
 `TF_GLM_KEPT_BYTES_GIB`, `TF_GLM_KEEP_PER_CHAT`, `TF_GLM_EXL3_DEC_ORDER`, `DISPLAY_KV_BACKEND=dispram`); their
 contributors' measurements are in the PRs.
 
