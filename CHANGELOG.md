@@ -3,6 +3,16 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A prompt chunk's pool selection in one pass** (patch `0101-glm-prompt-select-floor`, by [BadAd84](https://github.com/BadAd84)):
+  `_select_rows` read a row's scores five times (four radix passes and the write), and at long context a
+  row has hundreds of thousands of pools. `prompt_pools` reads them once: a strided sample sets a floor,
+  one pass compacts the pools at or above it in pool order, and the radix select runs over those in
+  registers; a row with fewer than 512 or more than CAP candidates takes `_select_rows` itself, so the
+  pools and ties are the same. A 512-row block at 590k 6.24 -> 1.51 ms on one GB10. GPU check:
+  `tools/select_floor_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
