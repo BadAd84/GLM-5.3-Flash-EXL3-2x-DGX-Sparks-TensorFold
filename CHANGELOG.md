@@ -3,6 +3,19 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **Decode matmuls without clusters where they cost more than they save** (patch
+  `0103-glm-qmm-decode-noclusters`, by [BadAd84](https://github.com/BadAd84)): the decode 4-bit matmuls reduce their K slices through
+  the partials buffer and `reduce_kernel` instead of a thread-block cluster when the window has at most 64
+  rows and the weight holds fewer than 28 Mi values: the same slice-ordered fp32 sums, so the same bits. On
+  a GB10 the cluster's launch and syncs cost 20-60% on those latency-bound matrices (a shared expert's
+  gate/up at one row 29.3 -> 18.4 us), at the shapes of two, three and four Sparks; from 32 Mi the clusters
+  mostly win, and no shape sits between. Live on three Sparks: real code 89.5 / 88.6 -> 90.6 / 90.0 tok/s,
+  prose 64.7 / 64.5 -> 66.4 / 66.6. `TF_GLM_QMM_CLUSTERS=1`: the clusters as before. The extension is renamed
+  `tensorfold_qmm_v5`, so a kernel folder with v4's build does not serve it. GPU check:
+  `tools/qmm_noclusters_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
