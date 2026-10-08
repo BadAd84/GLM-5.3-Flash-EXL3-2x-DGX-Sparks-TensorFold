@@ -79,8 +79,8 @@ GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-ten
 # cannot) while patches/*.patch and IMAGE_EXTRAS still hash to IMAGE_TAG's hash. Other patches pull
 # $GHCR_IMAGE:<TF_VERSION>-<hash> when one is published, else build locally. scripts/publish-image.sh prints both.
 # The same image serves two and three Sparks.
-IMAGE_TAG="${IMAGE_TAG:-v0.6.0-31557ed1cef6}"
-IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:cbb4b3c66273e2965dd40a7227e7a5243db333fe250113fb3987462ad4f12588}"
+IMAGE_TAG="${IMAGE_TAG:-v0.6.0-bd91ecd14811}"
+IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:43a8e61cbd4288a07e69cb8677c40faa187d93f3a748111f51064f9e9f23e828}"
 # the registry reference prepare.sh pulls for these patches: the pinned digest, or the hash's tag
 prebuilt_image() {
   local tag="${TF_VERSION}-$(image_hash)"
@@ -207,6 +207,15 @@ fi
 # or four alternating conversations push each other out (issue #17). Each entry reserves its fixed state (~45 MiB) at
 # start: 32 takes ~1 GiB more than 8.
 export TF_GLM_CACHE_ENTRIES="${TF_GLM_CACHE_ENTRIES:-32}"
+# Two more limits on the kept states (patch 0089, both off by default; PR #65 by Thomas Wade): TF_GLM_KEPT_BYTES_GIB
+# caps the device memory the kept states own outside the pool (their DFlash2 window copies and recurrent state, ~45 MiB
+# each without a window, hundreds of MB with long ones), together: 0 is no cap, 4 is the author's value; past it the
+# least valuable state is dropped (by the same order as the entry count's) and freed blocks go back to the driver.
+# TF_GLM_KEEP_PER_CHAT keeps at most this many of one conversation's own turn-boundary states (the author runs 2; 0 is
+# no limit): one long chat can no longer fill the entries alone. Neither is written to the spill tier when it drops.
+# /health shows kept_bytes, kept_bytes_cap and kept_mix.
+export TF_GLM_KEPT_BYTES_GIB="${TF_GLM_KEPT_BYTES_GIB:-0}"
+export TF_GLM_KEEP_PER_CHAT="${TF_GLM_KEEP_PER_CHAT:-0}"
 # Earlier turns keep their reasoning in the prompt (patch 0060), as in zai-org's current template. 1: drop it, as the
 # checkpoint's template does; agents then prefill the previous turn's tool loop again at each new user message.
 export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
@@ -215,7 +224,16 @@ export TF_GLM_CLEAR_THINKING="${TF_GLM_CLEAR_THINKING:-0}"
 # queues as every scheduler always has; 0 refuses anything past the lanes. A single-instance deployment with
 # no load balancer in front of it should set a small value (ours: 0, in scripts/local.sh).
 MAX_QUEUED="${MAX_QUEUED:-}"
+# A streamed request is checked before its 200 goes out (patch 0095), so it gets the same 429 + Retry-After.
 export TF_GLM_MAX_QUEUED="$MAX_QUEUED"
+# Sampled decode with the checkpoint's defaults (temperature 1, top_p 0.95, top_k 0) draws from the top_p nucleus
+# (patch 0034). Stock TensorFold tests each rank's candidates alone, which fails on any two ranks whenever both hold
+# part of the nucleus, so every such step gathered and sorted the whole vocabulary on the CPU: ~15 tok/s against
+# greedy's ~58 on two Sparks (issue #91). NUCLEUS_UNION=1 (the default) tests the ranks' candidates together: the
+# same nucleus and the same draw (the merged walk stops above every partial rank's last candidate, so no unsent token
+# can be in it; tools/test_nucleus_union.py compares both paths), 42-61 tok/s. A step whose nucleus is still wider
+# makes one extra 16,384-candidate gather before the whole shards. 0: stock behaviour. Every rank gets the same value.
+export TENSORFOLD_NUCLEUS_UNION="${NUCLEUS_UNION:-${TENSORFOLD_NUCLEUS_UNION:-1}}"
 # Waiting prompts filled together in one forward (patch 0049): shared work (expert weights, glue, projections) runs once
 # for every waiting prompt, attention per prompt on its own state, so each gets the bits it gets alone. sparkDash, prose at
 # 4 at once: 103.4 -> 108.8 tok/s, time to first token 590 -> 340 ms; structured at 3 / 4 at once: 175.2 -> 196.3 and
@@ -246,6 +264,11 @@ export TF_GLM_L2PF="${TF_GLM_L2PF:-1}"
 # Together with TF_GLM_L2PF=1 and TF_ROCE_MAX_KB=512: one request's prose 49.68, code 61.49 (+2.7% / +3.3%); 4 at once
 # prose 74.8 -> 76.6, code 100.0 -> 102.7 tok/s in all (two boots each). Same bits. 0: TensorFold's 32-bit loads.
 export TF_GLM_EXL3_LOADS="${TF_GLM_EXL3_LOADS:-nc}"
+# The decode expert kernel's block launch order (patch 0090, by lukaszraczylo): 0 (default) the grid as launched, items
+# fastest; 1: the eight 128-column blocks of one k slice run together (contiguous trellis reads), then the items; 2: then
+# the matrices and splits. The same bits for every value; the author's single-stream gain for 1 is +2.2%, one tester, not yet
+# measured here. Not TF_GLM_EXL3_ORDER, which is patch 0020's prompt order (default on).
+export TF_GLM_EXL3_DEC_ORDER="${TF_GLM_EXL3_DEC_ORDER:-0}"
 # Conversations that share a system prompt reuse its prompt state (patch 0015): a 7.9k-token system prompt's second and
 # later chats prefill in 0.13 s instead of 4.24 s. Same replies. SHARED_PREFIX=0 turns it off.
 SHARED_PREFIX="${SHARED_PREFIX:-1}"
@@ -279,6 +302,12 @@ export TF_GLM_CACHE_GIB="$KV_POOL_GIB"
 # to card0. Needs /dev/dri/card0 in the containers (nvidia_drm with modeset=1; --gpus all passes it). 0 (default): off.
 DISPLAY_KV_MIB="${DISPLAY_KV_MIB:-0}"
 export TF_GLM_DISPLAY_KV_MIB="$DISPLAY_KV_MIB"
+# Where the span's reservation half comes from (patch 0087): drm (default) maps a DRM dumb buffer on card0, as above;
+# dispram takes it from the dispramd daemon of kindling spark-os, whose nvidia_drm runs without modeset (no dumb
+# buffers: CREATE_DUMB fails ENOSYS) and whose daemon owns the reservation. start.sh mounts dispramd's socket and its
+# python client into every rank for dispram and refuses a Spark without them.
+DISPLAY_KV_BACKEND="${DISPLAY_KV_BACKEND:-drm}"
+export TF_GLM_DISPLAY_KV_BACKEND="$DISPLAY_KV_BACKEND"
 
 export TENSORFOLD_NO_UPDATE_CHECK="${TENSORFOLD_NO_UPDATE_CHECK:-1}"
 
@@ -351,3 +380,18 @@ prepared_state() {
   done
   echo "$line"
 }
+
+# Spill tier (patch 0088-glm-spill-tier, off by default): kept prompt states go to local disk on each Spark and come
+# back instead of a new prefill, also after a clean restart. SPILL_GIB: the cap per Spark (0: off). SPILL_DIR: the same
+# absolute path on every Spark (mounted at /spill; files owned by your user). SPILL_HIGHWATER: past this fraction of
+# the KV pool, the kept prompts eviction would take next are written in the background (1.0: only when evicted).
+# A clean stop writes what is kept within SPILL_FLUSH_S seconds; STOP_TIMEOUT gives it the time. README: Spill tier.
+SPILL_GIB="${SPILL_GIB:-0}"
+SPILL_DIR="${SPILL_DIR:-$HOME/.cache/tensorfold-spill}"
+SPILL_HIGHWATER="${SPILL_HIGHWATER:-0.70}"
+SPILL_MIN_TOKENS="${SPILL_MIN_TOKENS:-8192}"
+SPILL_MIN_FREE_GIB="${SPILL_MIN_FREE_GIB:-50}"
+SPILL_FLUSH_S="${SPILL_FLUSH_S:-60}"
+if [[ "$SPILL_GIB" != 0 ]]; then
+  STOP_TIMEOUT="${STOP_TIMEOUT:-$(( ${SPILL_FLUSH_S%.*} + 30 ))}"
+fi
