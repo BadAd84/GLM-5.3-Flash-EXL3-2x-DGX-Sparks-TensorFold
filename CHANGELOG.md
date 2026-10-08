@@ -3,7 +3,15 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
-## Unreleased
+## v1.9 (2026-10-08): the Anthropic Messages API, long-context speed, a spill tier, a loop guard and protocol fixes
+
+Image: `v0.6.0-bd91ecd14811`, 94 patches, for two and three Sparks (v1.8's plus `0084`-`0095`). Tested live on two
+Sparks before release: the smoke test, `tools/anthropiccheck.py` (all ok, chunked bodies included),
+`tools/toolcheck.py`, a chunked `/v1/chat/completions` body, `/v1/responses` with `include`, the 400 framing on a
+kept-alive connection, and default sampling at greedy's speed (512 tokens, thinking off: 44.1 tok/s greedy, 43.5
+sampled at temperature 1, top_p 0.95). The new switches are off by default (`TF_GLM_LOOP_GUARD`, `SPILL_GIB`,
+`TF_GLM_KEPT_BYTES_GIB`, `TF_GLM_KEEP_PER_CHAT`, `TF_GLM_EXL3_DEC_ORDER`, `DISPLAY_KV_BACKEND=dispram`); their
+contributors' measurements are in the PRs.
 
 - **Chunked request bodies** (patch `0094-chunked-request-bodies`, issues #67 and #74): a `Transfer-Encoding: chunked`
   request (AI SDK clients, Chatbox, proxies) has no `Content-Length`, so v0.6.0 read it as an empty body ("messages
