@@ -3,6 +3,20 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A prompt chunk's sparse attention in CUDA at three Sparks** (patch `0106-glm-sparse-onepass-cuda`, by
+  [BadAd84](https://github.com/BadAd84)): `sparse_onepass.cu` computes every output of `_sparse_onepass` with the Triton kernel's own
+  instruction sequence, read from its PTX (the mma chains and their K order, the online softmax's roundings
+  and `ex2.approx`, the p-sum's reduction tree, `div.full`): the same bits under Triton 3.7. Producer warps gather and convert
+  the FP8 rows two tiles ahead, q stays in registers, the softmax stays inside a warp, and 384 mma a tile
+  instead of 768. FP8 caches with 17-24 heads a rank (22 / 21 at TP=3); 32 heads (TP=2) keep Triton. A
+  2,048-row chunk at 113k on one GB10: 7.98 -> 3.51 ms with recent selections, 8.72 -> 7.30 ms with
+  spread ones. Live on three Sparks, cold prefill at 226k 103.58 -> 98.65 s (the first version), then
+  99.61 -> 98.53 s (the balanced warps). Built when the engine starts; under another Triton release
+  (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves (logged once).
+  `TF_GLM_ONEPASS_CUDA=0`: Triton. Applies after `0105`. GPU check: `tools/sparse_onepass_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
