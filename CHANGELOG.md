@@ -3,6 +3,13 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **Spill tier: the free-disk floor makes room** (patch `0088-glm-spill-tier`, #78 by Robert Wojciechowski, @wojo):
+  a write that would leave less than `SPILL_MIN_FREE_GIB` free now drops the oldest spilled files first, and is
+  skipped only when that cannot make the room (before: always skipped). Writes still queued count as written. Off
+  unless `SPILL_GIB` is set.
+
 ## v1.9 (2026-10-08): the Anthropic Messages API, long-context speed, a spill tier, a loop guard and protocol fixes
 
 Image: `v0.6.0-bd91ecd14811` (`sha256:43a8e61cbd4288a07e69cb8677c40faa187d93f3a748111f51064f9e9f23e828`), 94 patches, for two and three Sparks (v1.8's plus `0084`-`0095`). Tested live on two
