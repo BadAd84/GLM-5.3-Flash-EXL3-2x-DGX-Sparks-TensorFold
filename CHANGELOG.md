@@ -3,6 +3,18 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A prompt chunk's indexer scoring in CUDA** (patch `0105-glm-prompt-scores-cuda`, by [BadAd84](https://github.com/BadAd84)): `_scores`
+  (patch 0086's loop) converts and loads each 64-pool FP8 key tile again for every row. `prompt_scores.cu`
+  computes every score with the Triton kernel's own instruction sequence, read from its PTX (the mma K
+  order of Triton's kWidth-4 dot layout, the epilogue's roundings, the head sum's order), while a CTA of 8
+  rows converts each tile once: the same bits under Triton 3.7, whose PTX it reproduces. A 512-row block's
+  scores on one GB10: 0.61 / 1.85 / 4.85 / 10.07 -> 0.40 / 1.30 / 3.39 / 6.77 ms at 35k / 113k / 300k / 590k.
+  The extension is built when the engine starts, not at the first long prompt. Under another Triton release
+  (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves and the start goes on (logged once).
+  `TF_GLM_SCORES_CUDA=0`: Triton. Applies after `0101`. GPU check: `tools/prompt_scores_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
