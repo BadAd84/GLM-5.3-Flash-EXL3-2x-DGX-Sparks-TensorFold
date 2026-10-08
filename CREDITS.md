@@ -109,6 +109,9 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
 - `0077-glm-kept-cap-shared-by-recency` (a new agent run keeps its system prompt's state once the kept-state cap is
   full): the diagnosis, and the fix of evicting shared-prefix states by recency only, by
   [meleesciony](https://github.com/meleesciony) in [issue #75](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/75); the code is our own.
+- `0097-glm-kept-entries-share` (the kept-state count as a share of the pool's memory, `TF_GLM_CACHE_SHARE_PCT`): the
+  diagnosis (a count cap against a pool sized in tokens, with the reporter's measured eviction pattern and the 128
+  workaround) is by [jdecker76](https://github.com/jdecker76) in [issue #84](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/84); the code is our own.
 - `0078-glm-take-over-decide-then-copy` (a fresh conversation after a long one clones only the kept states that stay):
   by [m-naoki-m](https://github.com/m-naoki-m), also proposed upstream as
   [TensorFold PR #421](https://github.com/ashhart/TensorFold/pull/421).

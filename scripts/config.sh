@@ -207,6 +207,12 @@ fi
 # or four alternating conversations push each other out (issue #17). Each entry reserves its fixed state (~45 MiB) at
 # start: 32 takes ~1 GiB more than 8.
 export TF_GLM_CACHE_ENTRIES="${TF_GLM_CACHE_ENTRIES:-32}"
+# TF_GLM_CACHE_SHARE_PCT (patch 0097, off by default; issue #84 by @jdecker76): the count above is also a memory
+# reservation (the pool shrinks by ~45 MiB an entry; the estimate is unchanged), so a pool with millions of free tokens
+# can still evict a live conversation at the 33rd state. A share makes the count at least that part of KV_POOL_GIB's
+# budget: 25 is 71 states, ~3.1 GiB of the 12.5. Any count is cut to 75% of the budget, logged at start. Watch
+# /health kept_prompts against pool_free_tokens: kept_prompts pinned at the count with a free pool is this symptom.
+export TF_GLM_CACHE_SHARE_PCT="${TF_GLM_CACHE_SHARE_PCT:-0}"
 # Two more limits on the kept states (patch 0089, both off by default; PR #65 by Thomas Wade): TF_GLM_KEPT_BYTES_GIB
 # caps the device memory the kept states own outside the pool (their DFlash2 window copies and recurrent state, ~45 MiB
 # each without a window, hundreds of MB with long ones), together: 0 is no cap, 4 is the author's value; past it the
