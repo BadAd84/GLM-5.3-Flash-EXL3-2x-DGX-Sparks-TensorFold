@@ -3,6 +3,19 @@
 Every change to this recipe, newest first. Each release names the image it serves: `scripts/prepare.sh` pulls
 `ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-tensorfold` by the digest pinned in `scripts/config.sh`.
 
+## Unreleased
+
+- **A decode window's latent attention in CUDA at three Sparks** (patch `0108-glm-seg-chunks-cuda`, by
+  [BadAd84](https://github.com/BadAd84)): `seg_chunks.cu` computes every chunk partial of `_seg_chunks` with the Triton kernel's own
+  instruction sequence (patch 0106's chains, in `_seg_chunks`' kWidth-4 dot layout and p-sum tree; key
+  tiles past a chunk's last key, which Triton runs fully masked, are skipped): the same bits under Triton 3.7, and
+  Triton's `_merge` reads them as before. FP8 arenas with 17-24 heads a rank (22 / 21 at TP=3); 32 heads
+  keep Triton. One GB10, the whole call at 4 streams x 8 rows at 596k: 242.5 -> 94.8 us a call (x11 layers a round). Live on three Sparks:
+  real code / prose rounds 46.90 / 37.40 -> 46.35 / 37.00 ms. Built when the engine starts; under another
+  Triton release (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves (logged once).
+  `TF_GLM_SEG_CHUNKS_CUDA=0`: Triton. Applies after `0104`, `0105` and `0106`. GPU check:
+  `tools/seg_chunks_check.py`.
+
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
 Image: `v0.6.0-a1897d591f70` (`sha256:bc34d7d63f978cf601f42863b284bc95a567c50c10e9adb0866a635be568bf5f`), 96 patches (v1.9.1's plus `0096`, `0097`). Tested live on two
