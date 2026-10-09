@@ -220,6 +220,7 @@ Every change to this recipe, newest first. Each release names the image it serve
   Both now read the body through `0059`'s `_discard_body` (`read_body`: Content-Length or chunked; a refusal closes the
   connection) before answering; a request without one reads nothing. CPU test: `tools/test_get_bodies.py` (fails on
   the unpatched source).
+- **Broken concurrent GLM engine is visible** (patch `0118-glm-broken-health-exit`): `/health` reports `ok: false` and its first error in `broken`; `/metrics` exposes `tensorfold_health:ok`. Opt-in `TF_GLM_EXIT_ON_BROKEN=1` logs the cause and exits with code 1 as soon as the broken state latches. The existing stall watchdog is unchanged. The cause shown in `/health` is cut at 200 characters. CPU check: `tools/test_broken_health_exit.py`.
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
