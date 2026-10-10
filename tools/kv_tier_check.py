@@ -19,7 +19,9 @@ host copy; the cap on disk drops least recently used points and unnamed blocks; 
 Part 1, the files: fsync order seen through a fake ``os.fsync`` / ``os.replace`` (a new tier's folder and root, each
 block fsynced before its rename, the blocks' directory before the point, the ids and small state before their renames,
 the points' directory before and after the json, every fsync and CRC off the engine loop); the json's CRC-32s equal the
-files'; files and folders take the tier directory's owner; a load checks every file on the reader threads and fails -
+files'; the same ids kept again as shared rewrite the json alone in the same order (not again once shared; a restart
+reads it; a point forgotten during the rewrite loses its json, one dropped before is left alone); files and folders
+take the tier directory's owner; a load checks every file on the reader threads and fails -
 None, no exception, nothing copied from the bad block on - on a corrupted, truncated or missing block, a block of the
 wrong size with a matching CRC, a damaged small state (which torch.load alone accepts), a point whose lineage was
 edited onto another computation's blocks; ``forget`` drops the point, the bad block (even one a waiting state names)
@@ -32,7 +34,9 @@ rows among them) and the format, and the real build key is stable.
 
 Part 2, the protocol: two real ``MultiDecoder``s (rank 0 deciding, a follower applying its messages in-process) over
 real Pools and Arenas, each rank its own Tier. A load with nothing else decoding, and one in slices beside a decoding
-stream (each KV_PART reaches the follower before rank 0 copies), become the same kept prompt on both ranks; a point the
+stream (each KV_PART reaches the follower before rank 0 copies), become the same kept prompt on both ranks; a point kept
+as a shared-prefix state restores as one on both ranks (rank 0's point decides, KV_END), its flag read back at a
+restart, and the same ids kept again as shared mark the point shared without a second write; a point the
 follower lacks is not loaded (KV_QUERY). A block damaged on the follower, the follower's small state damaged, a block
 damaged on rank 0 during a sliced load: every rank drops the point (KV_CHECK, KV_END), frees the load's extent, keeps
 nothing, the request gets the pool's hit (prefill); a later request does not load the same point again.
@@ -69,8 +73,10 @@ faulthandler.dump_traceback_later(int(TIMEOUT) + 30, exit=True)
 
 
 def _hung():
-    print(f"FAIL timed out after {TIMEOUT:g} s: a write or a load never finished", flush=True)
-    faulthandler.dump_traceback()
+    # the stacks go to stdout after the FAIL line: on stderr they could interleave with it in a merged log (docker
+    # forwards the two streams apart), cutting the line a runner's `^FAIL` looks for
+    print(f"\nFAIL timed out after {TIMEOUT:g} s: a write or a load never finished", flush=True)
+    faulthandler.dump_traceback(file=sys.stdout)
     os._exit(1)
 
 
@@ -362,6 +368,64 @@ try:
           and meta.get("ids_crc") == real_crc((t.points / f"{k1}.ids.npy").read_bytes())
           and meta.get("small_crc") == real_crc((t.points / f"{k1}.pt").read_bytes()))
     check("no temporary file is left", not list(t.points.glob(".*")) and not list(t.blocks.glob(".*")))
+    # the same ids kept again as a shared-prefix state: the point's json rewritten in the same order as its first write
+    events.clear()
+    os.fsync, os.replace = rec_fsync, rec_replace
+    try:
+        s1s = Snap(s1.ids, "W2")
+        s1s.shared = True
+        t.persist(s1s, src, 0)
+        t0 = time.time()
+        while time.time() - t0 < 10 and not json.loads((t.points / f"{k1}.json").read_text()).get("shared"):
+            time.sleep(0.01)
+        time.sleep(0.1)                                    # the directory's fsync after the rename
+    finally:
+        os.fsync, os.replace = real_fsync, real_replace
+    rj2 = idx("replace", os.path.join(pts, f".{k1}.json"), os.path.join(pts, f"{k1}.json"))
+    fj2 = idx("fsync", os.path.join(pts, f".{k1}.json"))
+    meta2 = json.loads((t.points / f"{k1}.json").read_text())
+    check("kept again as shared: the point's json rewritten (shared, nothing else changed), fsynced before its rename "
+          "and the points' directory after it, on the writer thread",
+          0 <= fj2 < rj2 < last_idx("fsync", pts) and all(e[-1] == "kvtier-writer" for e in events)
+          and meta2 == {**meta, "shared": True} and not list(t.points.glob(".*")))
+    check("kept again as shared: a restart reads the point back as shared",
+          kvtier.Tier(root + "/a", 1.0, 16, 0, {"test": "a"}, gain=1).index[k1]["shared"] is True)
+    events.clear()
+    os.replace = rec_replace
+    try:
+        t.persist(s1s, src, 0)                              # kept as shared again: already marked, nothing rewritten
+        time.sleep(0.3)
+    finally:
+        os.replace = real_replace
+    check("kept as shared again when the point is already shared: its json is not rewritten",
+          idx("replace", None, os.path.join(pts, f"{k1}.json")) < 0)
+    # the point dropped (forget) while its json is rewritten: the json it got back is removed, nothing else is left
+    tm = kvtier.Tier(root + "/mark", 1.0, 16, 0, {"test": "mark"}, gain=1)
+    sm = Snap(ids(3, 2 * B + 50), "M")
+    write(tm, sm, src, 0)
+    km = key_of(sm)
+    real_put = kvtier._put
+
+    def put_then_forget(path, w, owner=None):              # forget runs between the read and the rename
+        if str(path).endswith(f"{km}.json"):
+            tm.forget(km, ())
+        return real_put(path, w, owner)
+
+    kvtier._put = put_then_forget
+    try:
+        tm._mark_shared(km)
+    finally:
+        kvtier._put = real_put
+    check("a point forgotten while its json is rewritten: the rewritten json is removed",
+          km not in tm.index and not (tm.points / f"{km}.json").exists() and not list(tm.points.glob(".*")))
+    try:
+        tm._mark_shared(km)
+        late_err = None
+    except Exception as exc:
+        late_err = exc
+    check("a point dropped before its rewrite: left alone (no json, no error)",
+          late_err is None and not (tm.points / f"{km}.json").exists())
+    tm._readers.shutdown(wait=True)
 
     # files private (they hold prompts' tokens) and owned by the tier directory's owner (a server run as root in a
     # container)
@@ -720,8 +784,8 @@ try:
         return real_step(self, upto)
 
     kvtier.Loading.step = logged_step
-    for case in ("good", "good, sliced", "follower lacks it", "follower block", "follower small",
-                 "rank 0 block, sliced"):
+    for case in ("good", "good, sliced", "good, shared", "good, shared on rank 0 only", "follower lacks it",
+                 "follower block", "follower small", "rank 0 block, sliced"):
         step_log.clear()
         net = Net()
         ranks, srcs, snaps = [], [], []
@@ -730,6 +794,7 @@ try:
                              gain=1)
             s_src = arena(POOL)
             sn = Snap(IDS[:N2], f"P-{case}")              # the same ids and lineage on both ranks, each rank its rows
+            sn.shared = "shared" in case and (r == 0 or "rank 0 only" not in case)   # kept as a shared-prefix state
             write(tt, sn, s_src, 0)
             ranks.append(rank_decoder(r, net, tt, POOL, arena(POOL)))
             tier_rank[id(tt)] = r
@@ -772,13 +837,22 @@ try:
             check(f"{case}: the sliced load ended (loading cleared on both ranks)",
                   r0.loading is None and r1.loading is None)
         if case.startswith("good"):
-            ok = got is not None and got is not hit if case == "good" else held
+            ok = got is not None and got is not hit if not case.endswith("sliced") else held
             ok = ok and r0.loading is None and r1.loading is None
             for d, s_src, sn in zip(ranks, srcs, snaps):
                 c = d.kept[-1]
                 ok = ok and c.ids == sn.ids and rows_equal(s_src, d.arena, 0, c.extent.base, 0, N2)
                 ok = ok and torch.equal(c.rec, sn.rec)
             check(f"{case}: the load becomes the same kept prompt on both ranks, each with its own rows", ok)
+            want = "shared" in case
+            check(f"{case}: the restored state is {'a' if want else 'not a'} shared-prefix state on both ranks "
+                  f"(rank 0's point decides)", all(d.kept[-1].shared is want for d in ranks))
+            if case == "good, shared":
+                again = kvtier.Tier(root + f"/proto-{case}-r1".replace(" ", "_"), 1.0, 1, 1, {"test": "p", "rank": 1},
+                                    gain=1)
+                check("good, shared: a restart reads the point's shared flag back from its json",
+                      again.index[key]["shared"] is True)
+                again._readers.shutdown(wait=True)
             if case == "good, sliced":
                 pairs = [(step_log[i], step_log[i + 1]) for i in range(0, len(step_log) - 1, 2)]
                 check(f"good, sliced: {len(pairs)} slices, each sent before rank 0 copied (the follower's first)",
@@ -805,6 +879,42 @@ try:
         for d in ranks:
             d.tier._readers.shutdown(wait=True)
     kvtier.Loading.step = real_step
+    # the same ids kept again, now as a shared-prefix state: nothing written again, restored as one from then on
+    tsh = kvtier.Tier(root + "/shared-again", 1.0, 1, 0, {"test": "sa"}, gain=1)
+    first = Snap(IDS[:2 * B], "SA")
+    write(tsh, first, arena(4 * B), 0)
+    k_sa, written = key_of(first), tsh.stats["written_points"]
+    flag_before = tsh.index[k_sa]["shared"]
+    later = Snap(IDS[:2 * B], "SA2")
+    later.shared = True
+    tsh.persist(later, arena(4 * B), 0)
+    check("the same ids kept again as a shared-prefix state: not written again, the point restores as shared",
+          flag_before is False and tsh.index[k_sa]["shared"] is True and tsh.stats["written_points"] == written
+          and not tsh.pending)
+    settle(tsh)
+    t0 = time.time()
+    while time.time() - t0 < 10 and not json.loads((tsh.points / f"{k_sa}.json").read_text()).get("shared"):
+        time.sleep(0.01)
+    check("the same ids kept again as shared: a restart reads the point back as shared",
+          kvtier.Tier(root + "/shared-again", 1.0, 1, 0, {"test": "sa"}, gain=1).index[k_sa]["shared"] is True)
+    # kept again as shared while its first write still waits (in flight): the json it gets says shared
+    src_fl = arena(4 * B)
+    fl = Snap(IDS[:3 * B], "FL")
+    tsh.persist(fl, src_fl, 0)
+    fl2 = Snap(IDS[:3 * B], "FL2")
+    fl2.shared = True
+    tsh.persist(fl2, src_fl, 0)
+    tsh.drain(src_fl)
+    settle(tsh)
+    k_fl = key_of(fl)
+    t0 = time.time()
+    while time.time() - t0 < 10 and not (k_fl in tsh.index and json.loads(
+            (tsh.points / f"{k_fl}.json").read_text()).get("shared")):
+        time.sleep(0.01)
+    check("kept again as shared while its first write was in flight: indexed shared, and a restart reads it so",
+          k_fl in tsh.index and tsh.index[k_fl]["shared"] is True and not tsh.shared_later and
+          kvtier.Tier(root + "/shared-again", 1.0, 1, 0, {"test": "sa"}, gain=1).index[k_fl]["shared"] is True)
+    tsh._readers.shutdown(wait=True)
 
     # -- part 3: lineage forks (two streams resuming from one kept state, each prefilling its own rows) ----------------
     # A kept state P; streams A and B resume from it (MultiDecoder._admitted, the real ADMIT path) and prefill the SAME

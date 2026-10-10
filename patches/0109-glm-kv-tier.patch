@@ -33,10 +33,10 @@ index 9ff932d..a55b2ba 100644
                                 "every rank the same flags")
 diff --git tensorfold/families/glm5_next/cuda/kvtier.py tensorfold/families/glm5_next/cuda/kvtier.py
 new file mode 100644
-index 0000000..ed0ccd5
+index 0000000..59e3741
 --- /dev/null
 +++ tensorfold/families/glm5_next/cuda/kvtier.py
-@@ -0,0 +1,900 @@
+@@ -0,0 +1,947 @@
 +"""TF_GLM_KV_TIER=<dir>: kept prompt states on this rank's local disk (NVMe), so a conversation resumes from disk after
 +it left the device pool (evicted) or the server restarted, instead of being prefilled again. One disk tier at a time:
 +the spill tier (``--spill-gib``, ``tensorfold.cuda.spill``) keeps the same kept prompts in files of its own,
@@ -259,6 +259,7 @@ index 0000000..ed0ccd5
 +        self.small, self.size, self.where, self.small_bytes = small, size, where, small_bytes
 +        self.next = 0
 +        self.cut: list[str] = []                    # its tail block, copied when kept (``persist``)
++        self.shared = False                         # a shared-prefix state (``multi.cap_victim``), kept in its json
 +        self.failed: Exception | None = None
 +
 +
@@ -349,7 +350,9 @@ index 0000000..ed0ccd5
 +            for f in d.glob(".*"):
 +                f.unlink(missing_ok=True)
 +        self.lock = threading.Lock()
-+        self.index: dict[str, dict] = {}            # key -> {"n", "lineage", "blocks", "small_crc", "ids", "used"}
++        # key -> {"n", "lineage", "blocks", "small_crc", "ids", "used", "shared"}
++        self.index: dict[str, dict] = {}
++        self.shared_later: set[str] = set()         # points in flight whose ids were kept again as shared (``persist``)
 +        self.have_blocks: dict[str, int] = {}       # block on disk -> its CRC-32, from the points naming it
 +        present = {p.stem for p in self.blocks.glob("*.bin")}
 +        for meta in self.points.glob("*.json"):
@@ -362,7 +365,7 @@ index 0000000..ed0ccd5
 +                    continue
 +                self.index[key] = {"n": int(m["n"]), "lineage": str(m.get("lineage", "")), "blocks": blocks,
 +                                   "small_crc": int(m["small_crc"]), "ids": np.load(io.BytesIO(raw)),
-+                                   "used": meta.stat().st_mtime}
++                                   "used": meta.stat().st_mtime, "shared": bool(m.get("shared", False))}
 +                self.have_blocks.update(zip(blocks, crcs))
 +            except Exception:                        # a torn, damaged or foreign point: skipped, removed below
 +                continue
@@ -407,11 +410,23 @@ index 0000000..ed0ccd5
 +        ids = np.asarray(snap.ids, dtype=np.int32)
 +        n = len(ids)
 +        key = point_key(ids)
++        shared = bool(getattr(snap, "shared", False))
 +        with self.lock:
-+            if key in self.index or key in self.inflight:
-+                if key in self.index:
-+                    self.index[key]["used"] = time.time()
-+                return
++            known = key in self.index or key in self.inflight
++            m = self.index.get(key)
++            if m is not None:
++                m["used"] = time.time()
++            # the same ids kept again as a shared-prefix state: restored as one from now on, its json rewritten on the
++            # writer thread (``_writer``); a point still being written takes the flag when its json is
++            rewrite = known and shared and m is not None and not m["shared"]
++            if rewrite:
++                m["shared"] = True
++            elif known and shared and m is None:
++                self.shared_later.add(key)
++        if rewrite:
++            self.jobs.put(("shared", None, key, None))
++        if known:
++            return
 +        lineage = str(getattr(snap, "lineage", "") or "")
 +        hashes = block_hashes(ids, lineage)
 +        new = [(s, e, h) for s, e, h in hashes if h not in self.have_blocks and h not in self.inflight]
@@ -454,6 +469,7 @@ index 0000000..ed0ccd5
 +        job = _Job(key, n, ids, lineage, [h for _, _, h in hashes], new[:len(new) - len(cut)], small, size, where,
 +                   _nbytes(small))
 +        job.cut = [h for h, _ in cut]
++        job.shared = bool(getattr(snap, "shared", False))
 +        with self.lock:
 +            self.held += job.small_bytes + sum(r.numel() for _, r in cut)
 +        for h, data in cut:
@@ -577,6 +593,24 @@ index 0000000..ed0ccd5
 +        with self.lock:
 +            self.have_blocks[h] = crc
 +
++    def _mark_shared(self, key: str) -> None:
++        """The writer: point ``key``'s json rewritten with ``"shared": true`` (its ids kept again as a shared-prefix
++        state), as its first write: a temporary name, fsynced, renamed, then the points' directory fsynced. A point
++        dropped before is left alone; one dropped (``forget``) while this ran loses the json it got back."""
++        path = self.points / f"{key}.json"
++        with self.lock:
++            if key not in self.index:
++                return
++        meta = json.loads(path.read_text())
++        meta["shared"] = True
++        _put(path, lambda p: p.write_text(json.dumps(meta)), self.owner)
++        _fsync_dir(self.points)
++        with self.lock:
++            gone = key not in self.index
++        if gone:
++            path.unlink(missing_ok=True)
++            _fsync_dir(self.points)
++
 +    def _writer(self) -> None:
 +        while True:
 +            kind, job, h, item = self.jobs.get()
@@ -591,6 +625,12 @@ index 0000000..ed0ccd5
 +                    job.failed = exc
 +                finally:
 +                    self.free_slots.put(slot)
++                continue
++            if kind == "shared":                      # a written point kept again as shared: its json rewritten
++                try:
++                    self._mark_shared(h)
++                except Exception as exc:              # the flag stays in memory; the json says not shared
++                    print(f"[tensorfold] kv tier rank {self.rank}: marking {h} shared failed: {exc}", flush=True)
 +                continue
 +            if kind == "rows":                        # a released block's host copy
 +                try:
@@ -616,14 +656,18 @@ index 0000000..ed0ccd5
 +                small_crc = _put(self.points / f"{key}.pt", lambda p: torch.save(small, p), self.owner)
 +                _fsync_dir(self.points)
 +                meta = {"key": key, "n": n, "lineage": lineage, "blocks": names, "crcs": crcs, "ids_crc": ids_crc,
-+                        "small_crc": small_crc}
++                        "small_crc": small_crc, "shared": job.shared}
 +                _put(self.points / f"{key}.json", lambda p: p.write_text(json.dumps(meta)), self.owner)
 +                _fsync_dir(self.points)
 +                with self.lock:
++                    # kept again as shared while in flight (``persist``): marked now, its json rewritten next
++                    late = key in self.shared_later
 +                    self.index[key] = {"n": n, "lineage": lineage, "blocks": names, "small_crc": small_crc, "ids": ids,
-+                                       "used": time.time()}
++                                       "used": time.time(), "shared": job.shared or late}
 +                    self.stats["written_points"] += 1
 +                    self.stats["written_bytes"] += size
++                if late:
++                    self.jobs.put(("shared", None, key, None))
 +            except Exception as exc:                  # a full or failing disk: the state is just not kept on disk
 +                print(f"[tensorfold] kv tier rank {self.rank}: writing {key} failed: {exc}", flush=True)
 +            finally:
@@ -632,6 +676,7 @@ index 0000000..ed0ccd5
 +                    self.backlog -= size
 +                    self.held -= job.small_bytes
 +                    self.inflight.discard(key)
++                    self.shared_later.discard(key)
 +                    self.inflight.difference_update([h for _, _, h in job.new] + job.cut)
 +            try:                                      # after this job left inflight: its blocks are named or free
 +                self._prune()
@@ -775,6 +820,7 @@ index 0000000..ed0ccd5
 +        self.hashes, self.names, self.crcs, self.small = [], [], [], None
 +        self.next, self.copy_s, self.parts = 0, 0.0, 0
 +        self.got = None                               # ``finish``'s result, kept for the KV_END (multi)
++        self.shared = False
 +        self.ahead: dict = {}
 +        with tier.lock:
 +            m = tier.index.get(key)
@@ -785,6 +831,7 @@ index 0000000..ed0ccd5
 +            self._fail("no longer on this rank's disk")
 +            return
 +        self.n, self.ids = m["n"], m["ids"]
++        self.shared = bool(m.get("shared", False))   # rank 0's is every rank's (its KV_END)
 +        self.hashes = block_hashes(self.ids, m.get("lineage", ""))
 +        self.total = len(self.hashes)
 +        if [h for _, _, h in self.hashes] != m["blocks"]:
@@ -938,7 +985,7 @@ index 0000000..ed0ccd5
 +              flush=True)
 +    return tier
 diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
-index 775b2a5..d1e0888 100644
+index 775b2a5..a62aff2 100644
 --- tensorfold/families/glm5_next/cuda/multi.py
 +++ tensorfold/families/glm5_next/cuda/multi.py
 @@ -50,16 +50,17 @@ from tensorfold.cuda.scheduler import Scheduler
@@ -1070,7 +1117,7 @@ index 775b2a5..d1e0888 100644
              self.pool.resize(x, size)
  
      def _evict(self, c, spill: bool = True) -> None:
-@@ -1158,6 +1191,142 @@ class MultiDecoder:
+@@ -1158,6 +1191,144 @@ class MultiDecoder:
          self._emit(EVICT, [c.kid, int(spill)])
          self._drop(c, spill=spill)
  
@@ -1145,9 +1192,10 @@ index 775b2a5..d1e0888 100644
 +            print(f"[tensorfold] kv tier: kept state {ld.key} failed its checks on rank(s) "
 +                  f"{[r for r, row in enumerate(rows) if not row[0]]}: dropped on every rank, the request prefills",
 +                  flush=True)
-+        self._emit(KV_END, [kid, int(ok)])
++        shared = bool(ok and ld.shared)               # rank 0's point decides for every rank (cap_victim agrees)
++        self._emit(KV_END, [kid, int(ok), int(shared)])
 +        self._flush()
-+        return self._load_end(kid, ok)
++        return self._load_end(kid, ok, shared)
 +
 +    def _load_begin(self, kid: int, base: int, size: int, key: str) -> None:
 +        """Both ranks: kept state ``key``'s load from this rank's disk into a new extent [base, base + size) begins (its
@@ -1179,10 +1227,11 @@ index 775b2a5..d1e0888 100644
 +                  flush=True)
 +        return ld.got is not None
 +
-+    def _load_end(self, kid: int, ok: bool):
++    def _load_end(self, kid: int, ok: bool, shared: bool = False):
 +        """Both ranks: the loaded state becomes kept prompt ``kid`` (superseded or least-recently-used kept prompts make
-+        way past TF_GLM_CACHE_ENTRIES, as ``_keep``). Unless a rank's load failed its checks (``ok`` false, KV_CHECK's
-+        verdict): then every rank drops the point from its disk and frees the extent; None."""
++        way past TF_GLM_CACHE_ENTRIES, as ``_keep``), a shared-prefix state when its point was kept as one (``shared``,
++        rank 0's, so every rank's ``cap_victim`` picks alike). Unless a rank's load failed its checks (``ok`` false,
++        KV_CHECK's verdict): then every rank drops the point from its disk and frees the extent; None."""
 +
 +        from .decode import Snapshot
 +
@@ -1202,7 +1251,7 @@ index 775b2a5..d1e0888 100644
 +                             else None)
 +        snap.kid, snap.extent = kid, x
 +        snap.lineage = str(small.get("lineage", "") or f"disk-{ld.key}")
-+        snap.key, snap.images, snap.shared = snap.ids, False, False   # a text state: resumed by its ids (``_resume``)
++        snap.key, snap.images, snap.shared = snap.ids, False, bool(shared)   # a text state: resumed by its ids
 +        snap.own, snap.chat = False, 0           # as a spill restore: no conversation's quota (patch 0089)
 +        x.kept.append(snap)
 +        self.kept.append(snap)
@@ -1213,7 +1262,7 @@ index 775b2a5..d1e0888 100644
      # -- the spill tier (``tensorfold serve --spill-gib``; cuda/spill.py) ----------------------------------------------
      # Every call below runs on both ranks in the same order (rank 0 decides, rank 1 follows its ops); rank 0 sends what
      # it has queued before each of the tier's all-gathers (``_sync``). Rows a pending write reads, or a read is filling,
-@@ -1560,6 +1729,8 @@ class MultiDecoder:
+@@ -1560,6 +1731,8 @@ class MultiDecoder:
          used = max([len(k.ids) for k in x.kept], default=0)
          if getattr(x, "loading", None) is not None:      # a stored prompt being read into it (``_start_load``)
              used = max(used, x.loading.n)
@@ -1222,7 +1271,7 @@ index 775b2a5..d1e0888 100644
          if x.owner is not None:
              used = max(used, self.lanes[x.owner].st.pos)
          if self.partial is not None:
-@@ -1689,6 +1860,10 @@ class MultiDecoder:
+@@ -1689,6 +1862,10 @@ class MultiDecoder:
          return self.lanes[s.sid]
  
      def _iterate(self) -> list[Stream]:
@@ -1233,7 +1282,7 @@ index 775b2a5..d1e0888 100644
          if self.fill_budget:
              cancelled = []
              for lane in self.lanes.values():
-@@ -2189,11 +2364,15 @@ class MultiDecoder:
+@@ -2189,11 +2366,15 @@ class MultiDecoder:
                  s.out and s.out[-1] in self._ends(lane)) else DONE
              self._emit(FINISH, [lane.sid, reason])
              self._finish(lane.sid)
@@ -1249,7 +1298,7 @@ index 775b2a5..d1e0888 100644
          _unwatch(self.watchdog)
          self.iteration_since = None
  
-@@ -2245,6 +2424,9 @@ class MultiDecoder:
+@@ -2245,6 +2426,9 @@ class MultiDecoder:
              self.partial.close()
              self.partial = None
          self.lanes = {}
@@ -1259,7 +1308,7 @@ index 775b2a5..d1e0888 100644
          if self.broken is None:
              self.broken = RuntimeError("an iteration failed")
          return live
-@@ -2313,6 +2495,19 @@ class MultiDecoder:
+@@ -2313,6 +2497,19 @@ class MultiDecoder:
                  self._do_flush(p)
              elif op == SPILL:
                  self._spill(self._kept_by_id(p[0]), keep=self._kept_keys())
@@ -1275,11 +1324,11 @@ index 775b2a5..d1e0888 100644
 +            elif op == KV_CHECK:                      # this rank's verdict on its files, gathered
 +                self.g._gather_ints([int(self._load_check(p[0]))])
 +            elif op == KV_END:
-+                self._load_end(p[0], bool(p[1]))
++                self._load_end(p[0], bool(p[1]), bool(p[2]))
              elif op == MOVE:
                  self._move(self.pool.get(p[0]), p[1], p[2])
              elif op == GROW:
-@@ -2355,8 +2550,12 @@ class MultiDecoder:
+@@ -2355,8 +2552,12 @@ class MultiDecoder:
                  if self.lanes:
                      raise RuntimeError(f"rank 1 holds {len(self.lanes)} streams rank 0 has finished")
                  self.idle = True

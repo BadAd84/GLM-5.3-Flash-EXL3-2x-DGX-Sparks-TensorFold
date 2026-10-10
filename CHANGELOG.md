@@ -20,7 +20,10 @@ Every change to this recipe, newest first. Each release names the image it serve
   GiB; a turn branching from a shared history resumed (19-21 s) where the spill tier prefilled again. A request that
   resumed from a state forks its lineage at the resume point (the blocks before it keep the state's names, the rest
   get the request's own), so two requests resuming from one state never name each other's rows (reported by
-  [wojo](https://github.com/wojo), as in #124). CPU check: `tools/kv_tier_check.py`.
+  [wojo](https://github.com/wojo), as in #124). A state restored from disk keeps its shared-prefix flag (a system
+  block): rank 0's point decides for every Spark, so a restored system-prompt state is not dropped as superseded and
+  loaded again; ids kept again as a shared prefix after an own turn wrote them mark the point shared on disk. CPU
+  check: `tools/kv_tier_check.py`.
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
