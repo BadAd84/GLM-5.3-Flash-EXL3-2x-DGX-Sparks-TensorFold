@@ -199,3 +199,4 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   128 GB unified memory), two of them linked by their ConnectX-7 ports: every number in the README was measured there.
 
 If you believe something here is missing or credited wrongly, please open an issue.
+- `0101-glm-prompt-select-floor` (a prompt chunk's pool selection from one pass over the scores): by
