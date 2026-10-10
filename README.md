@@ -295,6 +295,10 @@ DRM path has no dumb buffers (`CREATE_DUMB` fails ENOSYS), and kindling's `dispr
 `DISPLAY_KV_BACKEND=dispram` (patch 0087) maps the same span through it (`dispram.map_glued`: ordinary device memory
 with the reservation's slice right above it, one virtual range). `start.sh` checks the daemon's socket and client and
 mounts both into every rank. 2032 MiB, measured on three Sparks at `PARALLEL=4`: +317,440 pool tokens.
+kindling's kernel also uses 64 KiB pages, where a pageable copy to the GPU straight from a safetensors mmap hangs
+in the driver once the process holds GPU memory; the DFlash2 drafter and the vision tower load after the main
+weights, so patch 0098 copies each of their tensors out of the mmap first (without it the server never finishes
+starting there). Nothing to set.
 On the Spark's unified memory, running out tends to freeze the machine rather than fail an allocation. A setting that
 does not fit is refused before any weights load, with the largest window that fits; `start.sh` then restarts once
 with that window and says so (free memory on both Sparks for the full one). Other settings' windows:
@@ -626,6 +630,7 @@ applied with `patch -p0` in filename order); `start.sh` rebuilds or re-pulls the
 | Weights | `0002-glm-dense-fp8`, `0005-glm-dense-q4` | the checkpoint's BF16 dense weights in FP8, or 4-bit with MSE-searched ranges (`DENSE`) | q4 over fp8: prose 38.9 -> 44.4 tok/s, code 44.2 -> 48.7, prefill ~1,090 -> ~1,260 tok/s |
 | KV cache | `0038-glm-kv-fp8` | the DSA latent cache and the indexer's pooled keys as FP8 rows (`KV=fp8`) | the 1M window with 4 requests fits |
 | KV pool | `0072-glm-display-kv` | the first DSA latent planes in a span ending in the GPU's display reservation, which `MemAvailable` does not count; the pool's row copies of those planes by a kernel (a memcpy may not cross the span's two registrations) (`DISPLAY_KV_MIB`, by ezoushen) | 1792 MiB: ~277k more tokens at `PARALLEL=8`; the same bits, decode and prefill |
+| Loads, kindling | `0098-glm-mmap-uploads` | the DFlash2 drafter's and the vision tower's loaders copy each tensor out of the safetensors mmap before it goes to the GPU: on kindling spark-os's 64 KiB-page kernel a pageable copy straight from a file mmap hangs in the driver once the process holds GPU memory (by [BadAd84](https://github.com/BadAd84)) | kindling: the server starts (it stopped after the drafter timings); elsewhere the same bytes, one host copy a tensor at start |
 | KV pool, kindling | `0087-glm-display-kv-dispram` | `0072`'s span with its reservation half from kindling spark-os's `dispramd` instead of a DRM dumb buffer, which kindling's `nvidia_drm` (no modeset) cannot make; the rest of `0072` runs unchanged (`DISPLAY_KV_BACKEND=dispram`) (by [BadAd84](https://github.com/BadAd84)) | 2032 MiB: +317,440 tokens at `PARALLEL=4` on three Sparks; the display check 53/53 |
 | Prompt | `0001-glm-exl3-prompt-experts`, `0004-glm-prompt-kernels`, `0009-glm-prefill-kernels`, `0020-glm-prompt-experts-order`, `0024-glm-prompt-select-rows`, `0028-glm-lean-prompt-scratch` | EXL3 expert kernels that keep a prompt chunk's rows in L2, launched in a better order; each row's input rotated once; dense attention only where the sparse pass needs it; token selection in blocks of 512 rows; smaller prompt scratch | faster prefill, less memory at 1M |
 | Prompt, indexer | `0086-glm-prompt-scores-loop` | a prompt chunk's indexer scoring (`0009`'s `_scores`) takes one row and 32 pool blocks a program (`SCORE_LOOP`), the row's queries loaded once, instead of 4 rows and one block (`TF_GLM_SCORE_RB`, retired), which reloaded every row's queries for each 64-pool block (by [BadAd84](https://github.com/BadAd84)) | the scoring 36% faster at long context (the part of a cold prefill that grows with it); cold prefill at 226k 138.3 -> 126.6 s; the same bits |
@@ -752,7 +757,7 @@ files are downloaded from Hugging Face and are not part of this repository:
 - **The base model** [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) is under the license on its model
   card.
 - **The DFlash2 drafter** is under [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/),
-  non-commercial use only (commercial licensing: contact@inco.ai); `DRAFTER=mtp` serves without it.
+  non-commercial use only: see [DFlash2's license](#dflash2s-license) below.
 
 **Third-party software in the image.** The prebuilt image (and the one `scripts/prepare.sh` builds) is based on
 NVIDIA's PyTorch container `nvcr.io/nvidia/pytorch:26.07-py3`, redistributed as a value-added runtime image. The NVIDIA
@@ -761,6 +766,16 @@ and the [Product-Specific Terms for NVIDIA AI Products](https://www.nvidia.com/e
 which the container prints at every start; by pulling or running the image you accept them. The image also contains
 PyAV (BSD) with its FFmpeg libraries (LGPL) and xgrammar (Apache 2.0). The Apache License above covers this
 repository's own work only.
+
+### DFlash2's license
+
+The default drafter, [DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2) by
+[IncoAI](https://huggingface.co/incoai), is licensed CC BY-NC-ND 4.0, as its
+[model card](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2) states: **non-commercial use only**, no derivatives
+(the license's [legal code](https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode); commercial licensing:
+contact@inco.ai). `DRAFTER=mtp` avoids that license: the checkpoint's own MTP head drafts instead, and with
+`DRAFTER=mtp` set before the first `./start.sh` DFlash2 is never downloaded. But the server then decodes one request
+at a time (`PARALLEL=1`) and loses DFlash2's 5-10% decode gain.
 
 ## Credits
 
