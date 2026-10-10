@@ -5,6 +5,12 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A prompt chunk's dense projections on a faster tile** (patch `0102-glm-prompt-matmul-tile`, by [BadAd84](https://github.com/BadAd84)):
+  `forward.mm` launched every 4-bit prompt projection on the extension's default tile 0. It now launches
+  tile 9 (128 x 128 on four 64 x 64 warps, two blocks an SM) where K >= 1024 and the grid has 96 or more
+  blocks, else tile 3. A tile only picks which warp computes an output, so the bits are the same. A
+  2,048-row chunk's dense projections on one GB10: 178.1 -> 152.2 ms at TP=3 shapes, 238.1 -> 200.7 ms at
+  TP=2 shapes. `TF_GLM_PROMPT_TILE=0`: tile 0. GPU check: `tools/prompt_tile_check.py`.
 - **The next draft pass starts at a round's end** (patch `0100-glm-draft-prelaunch`, by
   [BadAd84](https://github.com/BadAd84)): a decode round asked for its DFlash2 drafts only after rank 0 had emitted
   the last round's tokens, planned the next round and sent its message, so the GPU sat idle meanwhile (an nsys
