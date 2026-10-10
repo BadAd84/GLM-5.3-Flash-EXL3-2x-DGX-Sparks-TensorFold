@@ -12,6 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Apply patches to the pinned TensorFold source
+        run: |
+          git clone --depth 1 --branch v0.6.0 https://github.com/ashhart/TensorFold.git /tmp/tf
+          cd /tmp/tf/src
+          for p in "$OLDPWD"/patches/*.patch; do
+            echo "applying $(basename "$p")"
+            patch -p0 --forward < "$p" > /dev/null || { echo "::error::$(basename "$p") does not apply to TensorFold v0.6.0"; exit 1; }
+          done
       - name: Image pin matches the patch set
         run: |
           # image_hash() from scripts/config.sh: sha256(cat patches/*.patch + IMAGE_EXTRAS)[:12]
@@ -23,14 +31,6 @@ jobs:
             echo "::error::IMAGE_TAG ($T) does not match the current patch set (v0.6.0-$H). Publish an image for this patch set or bump the pin."
             exit 1
           fi
-      - name: Apply patches to the pinned TensorFold source
-        run: |
-          git clone --depth 1 --branch v0.6.0 https://github.com/ashhart/TensorFold.git /tmp/tf
-          cd /tmp/tf/src
-          for p in "$OLDPWD"/patches/*.patch; do
-            echo "applying $(basename "$p")"
-            patch -p0 --forward < "$p" > /dev/null || { echo "::error::$(basename "$p") does not apply to TensorFold v0.6.0"; exit 1; }
-          done
       - name: Self-contained tools tests (against the patched tree)
         run: |
           MD="$RUNNER_TEMP/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold/snapshots/rev"
