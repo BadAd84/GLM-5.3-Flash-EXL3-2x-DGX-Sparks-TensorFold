@@ -5,6 +5,16 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A call to a tool the request did not offer is reported** (patch `0114-glm-tool-call-rejections`, issue #103, by
+  [BadAd84](https://github.com/BadAd84)): a whole `<tool_call>` block naming a tool that is not in the request's
+  `tools` stays text and is never run, as before (names still match exactly; no namespace is stripped), but nothing
+  said so: to a client it looked like an ordinary answer. The server now logs one line per such reply with the
+  generated names (never argument values), and with `TF_GLM_TOOL_DIAGNOSTICS=1` the reply's `tensorfold` block (the
+  last event of a stream) carries `tool_call_rejections: [{"reason": "unknown_tool_name", "name": "exec"}]`, so a
+  gateway can re-prompt with the right tools. `0` turns both off. Tokens, text, calls and `finish_reason` are
+  unchanged in every mode (`tools/tool_diagnostics_check.py`: the real server over HTTP, streamed in rounds of 1, 7
+  and 1,024 tokens and whole).
+
 - **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
   while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
   half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at

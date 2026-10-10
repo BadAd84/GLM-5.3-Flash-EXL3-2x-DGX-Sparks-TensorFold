@@ -134,6 +134,7 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   [BadAd84](https://github.com/BadAd84).
 - `0086-glm-prompt-scores-loop` (the prompt scoring, one row and many pool blocks a program): by
   [BadAd84](https://github.com/BadAd84).
+- `0114-glm-tool-call-rejections` (a reply's call to a tool the request did not offer, reported): by [BadAd84](https://github.com/BadAd84).
 - `0099-glm-tokenize-nogil` (prompts tokenized with Python's GIL released): by [BadAd84](https://github.com/BadAd84).
 - `0087-glm-display-kv-dispram` (`DISPLAY_KV_BACKEND=dispram`: `0072`'s display reservation on kindling spark-os): by
   [BadAd84](https://github.com/BadAd84). It maps the span through `dispram`, the display-carveout lender of
