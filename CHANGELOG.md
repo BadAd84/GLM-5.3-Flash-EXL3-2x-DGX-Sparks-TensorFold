@@ -14,6 +14,13 @@ Every change to this recipe, newest first. Each release names the image it serve
   The extension is built when the engine starts, not at the first long prompt. Under another Triton release
   (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves and the start goes on (logged once).
   `TF_GLM_SCORES_CUDA=0`: Triton. Applies after `0101`. GPU check: `tools/prompt_scores_check.py`.
+- **A prompt chunk's pool selection in one pass** (patch `0101-glm-prompt-select-floor`, by [BadAd84](https://github.com/BadAd84)):
+  `_select_rows` read a row's scores five times (four radix passes and the write), and at long context a
+  row has hundreds of thousands of pools. `prompt_pools` reads them once: a strided sample sets a floor,
+  one pass compacts the pools at or above it in pool order, and the radix select runs over those in
+  registers; a row with fewer than 512 or more than CAP candidates takes `_select_rows` itself, so the
+  pools and ties are the same. A 512-row block at 590k 6.24 -> 1.51 ms on one GB10. GPU check:
+  `tools/select_floor_check.py`.
 - **kindling spark-os: the server starts** (patch `0098-glm-mmap-uploads`, by [BadAd84](https://github.com/BadAd84)):
   on kindling's 64 KiB-page kernel a pageable copy to the GPU straight from a safetensors mmap hangs in the driver
   (`cuMemcpyHtoDAsync`) once the process holds GPU memory, and the DFlash2 drafter and the GLM vision tower load
