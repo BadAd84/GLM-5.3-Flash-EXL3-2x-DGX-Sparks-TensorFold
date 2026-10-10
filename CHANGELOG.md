@@ -118,6 +118,18 @@ Every change to this recipe, newest first. Each release names the image it serve
   `/metrics`) and a rank-0 log line for one prefilling 4096 tokens or more, with where the prompt left the kept state
   and what it resumed from. CPU check: `tools/chat_continued_check.py` (fails on the unpatched engine).
 
+- **A system prompt's kept state stays once a second conversation goes on from it** (patch
+  `0120-glm-fork-point-shared`, issue #121, diagnosed with a proposed fix by @RyanLeeUPC; by
+  [BadAd84](https://github.com/BadAd84)): with a short first message, a conversation's own kept state is the
+  system block's state. The next conversation resumed from it and kept a longer state beside it, and past
+  `TF_GLM_CACHE_ENTRIES` the system block's state was dropped as superseded, so the third conversation on that
+  system prompt prefilled it whole again. A kept state that a prompt goes on from differently than the prompt that
+  wrote it is now a shared prefix (kept by recency, `0077`) and no conversation's own turn state
+  (`TF_GLM_KEEP_PER_CHAT`); so is one two conversations prefilled at the same time. A conversation's own next turn
+  is unchanged. The same replies: only which kept states stay changes. Known limit: with the opt-in
+  `TF_GLM_EFFORT_TAIL=1` (`0096`) the generation prompt ends in the effort line, which the conversation's own next turn does
+  not repeat at that position, so its own turn state can be taken for a fork (kept by recency instead of superseded-first;
+  never a different reply). CPU check: `tools/fork_point_check.py`.
 - **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
   while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
   half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at

@@ -232,6 +232,7 @@ If you believe something here is missing or credited wrongly, please open an iss
 - `0108-glm-seg-chunks-cuda` (a decode window's latent attention chunk pass in CUDA): by [BadAd84](https://github.com/BadAd84).
 - `0115-glm-unoffered-tool-call` (a call to a tool the request did not offer, reported): its report adapted from
   [BadAd84](https://github.com/BadAd84)'s `0114-glm-tool-call-rejections` (#137).
+- `0120-glm-fork-point-shared` (a kept state a second conversation goes on from is a shared prefix): the diagnosis and the first fix (the writer's next ids kept with a state, the state flagged when a resumed prompt goes on otherwise, the flag kept when the same ids are kept again) are by [RyanLeeUPC](https://github.com/RyanLeeUPC) in [issue #121](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/121); the rest by [BadAd84](https://github.com/BadAd84).
 - `0100-glm-draft-prelaunch` (the next round's DFlash2 block pass launched at a decode round's end,
   `TF_GLM_DRAFT_PRELAUNCH`): by [BadAd84](https://github.com/BadAd84).
 - `0102-glm-prompt-matmul-tile` (a prompt chunk's dense projections on tile 9 or 3): by [BadAd84](https://github.com/BadAd84).
