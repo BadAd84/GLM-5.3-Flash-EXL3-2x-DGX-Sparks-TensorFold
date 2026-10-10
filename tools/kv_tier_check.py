@@ -35,7 +35,12 @@ real Pools and Arenas, each rank its own Tier. A load with nothing else decoding
 stream (each KV_PART reaches the follower before rank 0 copies), become the same kept prompt on both ranks; a point the
 follower lacks is not loaded (KV_QUERY). A block damaged on the follower, the follower's small state damaged, a block
 damaged on rank 0 during a sliced load: every rank drops the point (KV_CHECK, KV_END), frees the load's extent, keeps
-nothing, the request gets the pool's hit (prefill); a later request does not load the same point again."""
+nothing, the request gets the pool's hit (prefill); a later request does not load the same point again.
+
+Part 3, lineage forks: a kept state P, and two streams admitted from it (``MultiDecoder._admitted``, the real ADMIT
+path) that prefill the same ids past it with rows of their own: each gets a lineage of its own (a fresh prefill too),
+the blocks before the resume point keep P's names, each writes its own blocks from the resume point's on, and a load of
+either gives its own rows bit for bit, never the other's."""
 import sys as _sys
 import traceback as _tb
 
@@ -800,6 +805,85 @@ try:
         for d in ranks:
             d.tier._readers.shutdown(wait=True)
     kvtier.Loading.step = real_step
+
+    # -- part 3: lineage forks (two streams resuming from one kept state, each prefilling its own rows) ----------------
+    # A kept state P; streams A and B resume from it (MultiDecoder._admitted, the real ADMIT path) and prefill the SAME
+    # ids past it on paths of their own (other chunking: other bits; here other random rows). Each kept state of theirs
+    # must name the kept state's blocks before the resume point and its own after it: a load of B's state gives B's
+    # rows, never rows A computed.
+    from tensorfold.families.glm5_next.cuda import decode as D
+    from tensorfold.families.glm5_next.cuda import forward as F
+
+    class _Sink:
+        def copy_(self, _):
+            return self
+
+    class _State:
+        def __init__(self, *a, **k):
+            self.rec, self.cur, self.conv = {0: _Sink()}, [0], _Sink()
+
+        def reset(self):
+            pass
+
+        def set_pos(self, _):
+            pass
+
+    real_state, real_tail = F.State, D.put_ring_tail
+    F.State, D.put_ring_tail = _State, lambda st, hit: None
+    try:
+        LP = 16 * B
+        tf_ = kvtier.Tier(root + "/fork", 1.0, 16, 0, {"test": "fork"}, gain=1)
+        df = rank_decoder(0, Net(), tf_, LP, arena(LP))
+        df.e, df.boot = types.SimpleNamespace(rows=16, caches=None, slots=None), "boot0"
+        IDF = ids(77, 8 * B)
+        npar, na, nb = 2 * B + 320, 4 * B + 128, 5 * B + 64      # B's prompt extends A's: the same ids past P
+        parent = Snap(IDF[:npar], "P0")
+        src_a = arena(LP)
+        src_b = arena(LP)
+        for pa, pb in zip(src_a.planes, src_b.planes):           # the parent's rows: the same bits in both forks
+            lo, hi = kvtier._plane_rows(pa, 0, npar)
+            pb.tensor[lo:hi] = pa.tensor[lo:hi]
+        check("fork: the kept state is written", write(tf_, parent, src_a, 0))
+        hit = dummy_kept(df, 0, 0, IDF[:npar])
+        hit.lineage, hit.rec, hit.conv, hit.own, hit.chat = "P0", parent.rec, parent.conv, False, 0
+
+        def admit(sid, kid, n, base):
+            s = types.SimpleNamespace(prompt=None, sid=None, cached=None, started=None, done=False)
+            a = dict(sid=sid, slot=sid, base=base, size=P.align_up(n), kid=kid, copy=True, count=0, stop_eos=False,
+                     draft=False, shared=[], code=[0, 0, 0, 0], prompt=[int(v) for v in IDF[:n]], images=False,
+                     keyed=None)
+            df._admitted(a, s, None, None)
+            return df.lanes[sid].lineage
+
+        lin_a = admit(1, 0, na, P.align_up(npar))
+        lin_b = admit(2, 0, nb, P.align_up(npar) + P.align_up(na))
+        lin_f = admit(3, -1, B, P.align_up(npar) + P.align_up(na) + P.align_up(nb))
+        check(f"fork: a fresh prefill starts a lineage of its own ({lin_f})", lin_f == "boot0-3")
+        check(f"fork: two streams resuming from one kept state get lineages of their own ({lin_a}, {lin_b})",
+              lin_a != lin_b and "P0" not in (lin_a, lin_b))
+        hb, hp = kvtier.block_hashes(IDF[:nb], lin_b), kvtier.block_hashes(IDF[:npar], "P0")
+        check("fork: the blocks before the resume point keep the kept state's names",
+              [h for _, _, h in hb[:2]] == [h for _, _, h in hp[:2]] and hb[2][2] != hp[2][2])
+        files = len(list(tf_.blocks.glob("*.bin")))
+        sa, sb = Snap(IDF[:na], lin_a), Snap(IDF[:nb], lin_b)
+        ok_a = write(tf_, sa, src_a, 0)
+        files_a = len(list(tf_.blocks.glob("*.bin")))
+        check(f"fork: A writes only its blocks from the resume point's on ({files} -> {files_a}: 3)",
+              ok_a and files_a == files + 3)
+        ok_b = write(tf_, sb, src_b, 0)
+        files_b = len(list(tf_.blocks.glob("*.bin")))
+        check(f"fork: B writes its own blocks from the resume point's on, none of A's ({files_a} -> {files_b}: 4)",
+              ok_b and files_b == files_a + 4)
+        for name, sn, src, n in (("A", sa, src_a, na), ("B", sb, src_b, nb)):
+            dst = arena(LP)
+            sentinel(dst)
+            got, exc = load_quiet(tf_, key_of(sn), dst, 3 * B)
+            check(f"fork: a load of {name}'s state gives {name}'s rows bit for bit (the parent's before the resume "
+                  f"point), never the other fork's",
+                  exc is None and got is not None and got[0] == sn.ids and rows_equal(src, dst, 0, 3 * B, 0, n))
+        tf_._readers.shutdown(wait=True)
+    finally:
+        F.State, D.put_ring_tail = real_state, real_tail
 finally:
     shutil.rmtree(root, ignore_errors=True)
 

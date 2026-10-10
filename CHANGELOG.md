@@ -17,8 +17,10 @@ Every change to this recipe, newest first. Each release names the image it serve
   production on three Sparks since 2026-10-03. Against the spill tier on one image (a ~620k conversation, ~23k-token
   turns): after a `kill -9` of every rank the next turn resumed (21.2 s) where the spill tier at its default
   high-water prefilled again (458 s); a turn wrote 0.2 GiB a Spark where the spill tier writing early (0.05) wrote 3.9
-  GiB; a turn branching from a shared history resumed (19-21 s) where the spill tier prefilled again. CPU check:
-  `tools/kv_tier_check.py`.
+  GiB; a turn branching from a shared history resumed (19-21 s) where the spill tier prefilled again. A request that
+  resumed from a state forks its lineage at the resume point (the blocks before it keep the state's names, the rest
+  get the request's own), so two requests resuming from one state never name each other's rows (reported by
+  [wojo](https://github.com/wojo), as in #124). CPU check: `tools/kv_tier_check.py`.
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 

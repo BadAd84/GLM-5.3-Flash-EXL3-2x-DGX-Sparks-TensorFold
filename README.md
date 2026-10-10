@@ -349,8 +349,10 @@ turn writes only what is new. Set `KV_TIER_GIB` (200 here) and `KV_TIER_DIR`, th
 it needs `PARALLEL` above 1. Use one tier at a time: `start.sh` refuses `KV_TIER_GIB` beside `SPILL_GIB`.
 
 - **Blocks.** A state's rows go to disk in blocks of 2,048 tokens, each named by a hash chain over the token ids and
-  the state's lineage (the computation it belongs to: the same ids prefilled another way are other blocks). A later
-  turn of a conversation names the blocks its earlier turns wrote and writes only the new ones: a +20k turn of a 600k
+  the state's lineage (the computation it belongs to: the same ids prefilled another way are other blocks). A request
+  that resumed from a state forks its lineage at the resume point: the blocks before it keep the state's names, the
+  rest get the request's own, so two requests resuming from one state never name each other's rows. A later turn of a
+  conversation names the blocks its earlier turns wrote and writes only the new ones: a +20k turn of a 600k
   conversation writes ~10 blocks, not the whole state. A small file per state holds its ids, recurrent state and
   DFlash2 window; its index file is written last.
 - **Writes.** When a state is kept, only its small state is copied off the GPU; its rows wait in the pool. Between

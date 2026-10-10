@@ -33,10 +33,10 @@ index 9ff932d..a55b2ba 100644
                                 "every rank the same flags")
 diff --git tensorfold/families/glm5_next/cuda/kvtier.py tensorfold/families/glm5_next/cuda/kvtier.py
 new file mode 100644
-index 0000000..4d021ad
+index 0000000..ed0ccd5
 --- /dev/null
 +++ tensorfold/families/glm5_next/cuda/kvtier.py
-@@ -0,0 +1,886 @@
+@@ -0,0 +1,900 @@
 +"""TF_GLM_KV_TIER=<dir>: kept prompt states on this rank's local disk (NVMe), so a conversation resumes from disk after
 +it left the device pool (evicted) or the server restarted, instead of being prefilled again. One disk tier at a time:
 +the spill tier (``--spill-gib``, ``tensorfold.cuda.spill``) keeps the same kept prompts in files of its own,
@@ -48,9 +48,11 @@ index 0000000..4d021ad
 +
 +- the rows, in blocks of ``BLOCK`` tokens named by a hash chained over the token ids and salted with the state's
 +  lineage (``block_hashes``): a block is written once and shared by every later state of the same computation, so a
-+  new turn writes only its new rows. The lineage (``MultiDecoder``: a stream inherits its kept state's, a fresh prefill
-+  starts a new one) keeps states of the same ids computed apart (other prompt chunking: other bits) from sharing
-+  blocks: a reloaded state is always rows, recurrences and windows of ONE computation;
++  new turn writes only its new rows. The lineage (``MultiDecoder``: a fresh prefill starts a new one; a stream that
++  resumed from a kept state FORKS that state's at the resume point, ``fork``) keeps rows computed apart (other prompt
++  chunking: other bits) from sharing blocks: the blocks before the resume point keep the kept state's names (those
++  rows are its bits), the rest get the stream's own, so two streams resuming from one state never name each other's
++  rows. A reloaded state is always rows, recurrences and windows of ONE computation;
 +- a point: the state's small tensors and ids (``points/<key>.pt``), then ``points/<key>.json`` naming its blocks -
 +  written LAST, so a point with its json is complete on this rank.
 +
@@ -274,14 +276,26 @@ index 0000000..4d021ad
 +    return root, cap, least, gain
 +
 +
++def fork(lineage: str, name: str, at: int) -> str:
++    """The lineage of a stream ``name`` that resumed from a kept state of ``lineage`` at token ``at`` and computes its
++    own rows from there: the kept state's names for the blocks before ``at``, its own from the block holding ``at``
++    on (``block_hashes``). A fresh prefill (no kept state, or one without a lineage) is ``name`` alone."""
++    return f"{lineage}|{name}@{int(at)}" if lineage else name
++
++
 +def block_hashes(ids: np.ndarray, lineage: str = "") -> list[tuple[int, int, str]]:
 +    """(start, end, hash) for each block of ``ids``: whole blocks, then the tail block [k * BLOCK, n) if any. A hash
-+    covers the lineage and every token up to its block's end (chained), and the tail's also its length, so equal
-+    hashes mean equal prefixes of one computation."""
-+    out, h, n = [], lineage.encode(), len(ids)
++    covers the lineage (its first computation, then each fork whose resume point the block holds; chained, so every
++    later block too) and every token up to its block's end (chained), and the tail's also its length, so equal hashes
++    mean equal prefixes of one computation."""
++    head, *rest = lineage.split("|")
++    forks = [(int(p.rpartition("@")[2]), f"|{p}".encode()) for p in rest]
++    out, h, n = [], head.encode(), len(ids)
 +    for s in range(0, n, BLOCK):
 +        e = min(n, s + BLOCK)
-+        d = hashlib.sha256(h + ids[s:e].astype(np.int32).tobytes() + (b"" if e - s == BLOCK else str(e).encode()))
++        salt = b"".join(f for at, f in forks if s <= at < e)
++        d = hashlib.sha256(h + salt + ids[s:e].astype(np.int32).tobytes()
++                           + (b"" if e - s == BLOCK else str(e).encode()))
 +        out.append((s, e, d.hexdigest()[:32]))
 +        if e - s == BLOCK:
 +            h = d.digest()
@@ -924,7 +938,7 @@ index 0000000..4d021ad
 +              flush=True)
 +    return tier
 diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
-index 775b2a5..9ab63f9 100644
+index 775b2a5..d1e0888 100644
 --- tensorfold/families/glm5_next/cuda/multi.py
 +++ tensorfold/families/glm5_next/cuda/multi.py
 @@ -50,16 +50,17 @@ from tensorfold.cuda.scheduler import Scheduler
@@ -1008,16 +1022,18 @@ index 775b2a5..9ab63f9 100644
          else:
              x = self.pool.add(a["base"], a["size"])
              if hit is not None:
-@@ -985,6 +1002,8 @@ class MultiDecoder:
+@@ -985,6 +1002,10 @@ class MultiDecoder:
          self.next_sid = max(self.next_sid, a["sid"] + 1)
          self.next_order += 1
          s.sid, s.cached = a["sid"], cut
-+        # the computation its rows belong to (``kvtier``): its kept state's, or a new one for a fresh prefill
-+        lane.lineage = getattr(hit, "lineage", None) or f"{self.boot}-{a['sid']}"
++        # the computation its rows belong to (``kvtier``): its kept state's up to the resume point (rows copied or taken
++        # over are those bits), its own from there (another stream resuming from the same state computes its own); a
++        # new one for a fresh prefill
++        lane.lineage = kvtier.fork(str(getattr(hit, "lineage", "") or ""), f"{self.boot}-{a['sid']}", cut)
          # the slot's state: the kept prompt's, or fresh
          st.reset()
          if self.drafts is not None:
-@@ -1064,6 +1083,7 @@ class MultiDecoder:
+@@ -1064,6 +1085,7 @@ class MultiDecoder:
          # rank 0's key: a text prompt's is its ids (shared, not a second list); rank 1 keeps none
          snap.key = None if lane.key is None else snap.ids if not lane.images else lane.key[:n]
          snap.images = lane.images
@@ -1025,7 +1041,7 @@ index 775b2a5..9ab63f9 100644
          snap.kid = self.next_kid
          self.next_kid += 1
          snap.extent = lane.extent
-@@ -1085,6 +1105,13 @@ class MultiDecoder:
+@@ -1085,6 +1107,13 @@ class MultiDecoder:
                  self._drop(c, spill=False)
          while len(self.kept) > max(1, self.g.cache_entries):
              self._drop(cap_victim(self.kept))
@@ -1039,7 +1055,7 @@ index 775b2a5..9ab63f9 100644
          # The entry cap is not a memory budget. Long conversations make each kept state own hundreds of MB outside
          # the pool (copies of the DFlash2 window), so 64 entries reached tens of GiB on the hosts (free memory to
          # 0.1 GB) and never came back. With TF_GLM_KEPT_BYTES_GIB set, rank 0 drops states past it, by the cap's
-@@ -1146,10 +1173,14 @@ class MultiDecoder:
+@@ -1146,10 +1175,14 @@ class MultiDecoder:
          if x.owner is not None:
              return
          if not x.kept:
@@ -1054,7 +1070,7 @@ index 775b2a5..9ab63f9 100644
              self.pool.resize(x, size)
  
      def _evict(self, c, spill: bool = True) -> None:
-@@ -1158,6 +1189,142 @@ class MultiDecoder:
+@@ -1158,6 +1191,142 @@ class MultiDecoder:
          self._emit(EVICT, [c.kid, int(spill)])
          self._drop(c, spill=spill)
  
@@ -1197,7 +1213,7 @@ index 775b2a5..9ab63f9 100644
      # -- the spill tier (``tensorfold serve --spill-gib``; cuda/spill.py) ----------------------------------------------
      # Every call below runs on both ranks in the same order (rank 0 decides, rank 1 follows its ops); rank 0 sends what
      # it has queued before each of the tier's all-gathers (``_sync``). Rows a pending write reads, or a read is filling,
-@@ -1560,6 +1727,8 @@ class MultiDecoder:
+@@ -1560,6 +1729,8 @@ class MultiDecoder:
          used = max([len(k.ids) for k in x.kept], default=0)
          if getattr(x, "loading", None) is not None:      # a stored prompt being read into it (``_start_load``)
              used = max(used, x.loading.n)
@@ -1206,7 +1222,7 @@ index 775b2a5..9ab63f9 100644
          if x.owner is not None:
              used = max(used, self.lanes[x.owner].st.pos)
          if self.partial is not None:
-@@ -1689,6 +1858,10 @@ class MultiDecoder:
+@@ -1689,6 +1860,10 @@ class MultiDecoder:
          return self.lanes[s.sid]
  
      def _iterate(self) -> list[Stream]:
@@ -1217,7 +1233,7 @@ index 775b2a5..9ab63f9 100644
          if self.fill_budget:
              cancelled = []
              for lane in self.lanes.values():
-@@ -2189,11 +2362,15 @@ class MultiDecoder:
+@@ -2189,11 +2364,15 @@ class MultiDecoder:
                  s.out and s.out[-1] in self._ends(lane)) else DONE
              self._emit(FINISH, [lane.sid, reason])
              self._finish(lane.sid)
@@ -1233,7 +1249,7 @@ index 775b2a5..9ab63f9 100644
          _unwatch(self.watchdog)
          self.iteration_since = None
  
-@@ -2245,6 +2422,9 @@ class MultiDecoder:
+@@ -2245,6 +2424,9 @@ class MultiDecoder:
              self.partial.close()
              self.partial = None
          self.lanes = {}
@@ -1243,7 +1259,7 @@ index 775b2a5..9ab63f9 100644
          if self.broken is None:
              self.broken = RuntimeError("an iteration failed")
          return live
-@@ -2313,6 +2493,19 @@ class MultiDecoder:
+@@ -2313,6 +2495,19 @@ class MultiDecoder:
                  self._do_flush(p)
              elif op == SPILL:
                  self._spill(self._kept_by_id(p[0]), keep=self._kept_keys())
@@ -1263,7 +1279,7 @@ index 775b2a5..9ab63f9 100644
              elif op == MOVE:
                  self._move(self.pool.get(p[0]), p[1], p[2])
              elif op == GROW:
-@@ -2355,8 +2548,12 @@ class MultiDecoder:
+@@ -2355,8 +2550,12 @@ class MultiDecoder:
                  if self.lanes:
                      raise RuntimeError(f"rank 1 holds {len(self.lanes)} streams rank 0 has finished")
                  self.idle = True
