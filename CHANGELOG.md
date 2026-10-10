@@ -16,6 +16,33 @@ Every change to this recipe, newest first. Each release names the image it serve
   stream's round -2 to -4%. Under another Triton release (`sparse.TRITON_PTX`), or when the build fails, the
   Triton scoring serves (logged once). `TF_GLM_SEG_SCORES_CUDA=0` / `TF_GLM_SEG_SELECT_FLOOR=0`: the old scoring /
   selection. Applies after `0101`, `0105` and `0106`. GPU check: `tools/decode_indexer_check.py`.
+- **A prompt chunk's sparse attention in CUDA at three Sparks** (patch `0106-glm-sparse-onepass-cuda`, by
+  [BadAd84](https://github.com/BadAd84)): `sparse_onepass.cu` computes every output of `_sparse_onepass` with the Triton kernel's own
+  instruction sequence, read from its PTX (the mma chains and their K order, the online softmax's roundings
+  and `ex2.approx`, the p-sum's reduction tree, `div.full`): the same bits under Triton 3.7. Producer warps gather and convert
+  the FP8 rows two tiles ahead, q stays in registers, the softmax stays inside a warp, and 384 mma a tile
+  instead of 768. FP8 caches with 17-24 heads a rank (22 / 21 at TP=3); 32 heads (TP=2) keep Triton. A
+  2,048-row chunk at 113k on one GB10: 7.98 -> 3.51 ms with recent selections, 8.72 -> 7.30 ms with
+  spread ones. Live on three Sparks, cold prefill at 226k 103.58 -> 98.65 s (the first version), then
+  99.61 -> 98.53 s (the balanced warps). Built when the engine starts; under another Triton release
+  (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves (logged once).
+  `TF_GLM_ONEPASS_CUDA=0`: Triton. Applies after `0105`. GPU check: `tools/sparse_onepass_check.py`.
+- **A prompt chunk's indexer scoring in CUDA** (patch `0105-glm-prompt-scores-cuda`, by [BadAd84](https://github.com/BadAd84)): `_scores`
+  (patch 0086's loop) converts and loads each 64-pool FP8 key tile again for every row. `prompt_scores.cu`
+  computes every score with the Triton kernel's own instruction sequence, read from its PTX (the mma K
+  order of Triton's kWidth-4 dot layout, the epilogue's roundings, the head sum's order), while a CTA of 8
+  rows converts each tile once: the same bits under Triton 3.7, whose PTX it reproduces. A 512-row block's
+  scores on one GB10: 0.61 / 1.85 / 4.85 / 10.07 -> 0.40 / 1.30 / 3.39 / 6.77 ms at 35k / 113k / 300k / 590k.
+  The extension is built when the engine starts, not at the first long prompt. Under another Triton release
+  (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves and the start goes on (logged once).
+  `TF_GLM_SCORES_CUDA=0`: Triton. Applies after `0101`. GPU check: `tools/prompt_scores_check.py`.
+- **A prompt chunk's pool selection in one pass** (patch `0101-glm-prompt-select-floor`, by [BadAd84](https://github.com/BadAd84)):
+  `_select_rows` read a row's scores five times (four radix passes and the write), and at long context a
+  row has hundreds of thousands of pools. `prompt_pools` reads them once: a strided sample sets a floor,
+  one pass compacts the pools at or above it in pool order, and the radix select runs over those in
+  registers; a row with fewer than 512 or more than CAP candidates takes `_select_rows` itself, so the
+  pools and ties are the same. A 512-row block at 590k 6.24 -> 1.51 ms on one GB10. GPU check:
+  `tools/select_floor_check.py`.
 - **kindling spark-os: the server starts** (patch `0098-glm-mmap-uploads`, by [BadAd84](https://github.com/BadAd84)):
   on kindling's 64 KiB-page kernel a pageable copy to the GPU straight from a safetensors mmap hangs in the driver
   (`cuMemcpyHtoDAsync`) once the process holds GPU memory, and the DFlash2 drafter and the GLM vision tower load
