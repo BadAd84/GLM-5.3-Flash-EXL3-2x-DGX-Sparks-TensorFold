@@ -5,6 +5,13 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
+  while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
+  half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at
+  most `TF_GLM_PREFILL_ROWS`): the same memory, the same replies, half the passes over the expert weights. Three
+  Sparks, `PARALLEL=4`, a 35k-token reply streaming meanwhile: a warm +20k turn on a 596k conversation 15.6-15.7 ->
+  14.0-14.1 s, a cold ~256k prompt 132.2-132.6 -> 113.4-114.0 s; the reply's gaps during the fill median 13-15 /
+  p99 20-25 / max 25-67 ms either way. `FILL_ROWS=1024` restores the old size. CPU check: `tools/fill_rows_check.py`.
 - **Decode matmuls without clusters where they cost more than they save** (patch
   `0103-glm-qmm-decode-noclusters`, by [BadAd84](https://github.com/BadAd84)): the decode 4-bit matmuls reduce their K slices through
   the partials buffer and `reduce_kernel` instead of a thread-block cluster when the window has at most 64
