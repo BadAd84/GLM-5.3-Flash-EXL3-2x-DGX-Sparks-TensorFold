@@ -5,6 +5,16 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **Decode matmuls without clusters where they cost more than they save** (patch
+  `0103-glm-qmm-decode-noclusters`, by [BadAd84](https://github.com/BadAd84)): the decode 4-bit matmuls reduce their K slices through
+  the partials buffer and `reduce_kernel` instead of a thread-block cluster when the window has at most 64
+  rows and the weight holds fewer than 28 Mi values: the same slice-ordered fp32 sums, so the same bits. On
+  a GB10 the cluster's launch and syncs cost 20-60% on those latency-bound matrices (a shared expert's
+  gate/up at one row 29.3 -> 18.4 us), at the shapes of two, three and four Sparks; from 32 Mi the clusters
+  mostly win, and no shape sits between. Live on three Sparks: real code 89.5 / 88.6 -> 90.6 / 90.0 tok/s,
+  prose 64.7 / 64.5 -> 66.4 / 66.6. `TF_GLM_QMM_CLUSTERS=1`: the clusters as before. The extension is renamed
+  `tensorfold_qmm_v5`, so a kernel folder with v4's build does not serve it. GPU check:
+  `tools/qmm_noclusters_check.py`.
 - **A prompt chunk's dense projections on a faster tile** (patch `0102-glm-prompt-matmul-tile`, by [BadAd84](https://github.com/BadAd84)):
   `forward.mm` launched every 4-bit prompt projection on the extension's default tile 0. It now launches
   tile 9 (128 x 128 on four 64 x 64 warps, two blocks an SM) where K >= 1024 and the grid has 96 or more
