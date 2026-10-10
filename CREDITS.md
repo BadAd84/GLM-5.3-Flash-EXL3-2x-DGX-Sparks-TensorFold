@@ -201,3 +201,5 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
 If you believe something here is missing or credited wrongly, please open an issue.
 - `0101-glm-prompt-select-floor` (a prompt chunk's pool selection from one pass over the scores): by
 - `0105-glm-prompt-scores-cuda` (a prompt chunk's indexer scoring in CUDA, Triton's instruction order): by
+- `0106-glm-sparse-onepass-cuda` (a prompt chunk's sparse attention in CUDA, Triton's instruction order):
+  by [BadAd84](https://github.com/BadAd84).
