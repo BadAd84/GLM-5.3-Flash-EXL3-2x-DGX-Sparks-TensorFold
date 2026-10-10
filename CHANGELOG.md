@@ -5,6 +5,17 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **No stall at a long request's start** (patch `0099-glm-tokenize-nogil`, by [BadAd84](https://github.com/BadAd84)):
+  the server tokenized each prompt with the tokenizer's `encode`, which holds Python's GIL for the whole text (~1.2
+  us a token), so while a long prompt was being tokenized the engine loop, and every other stream with it, stopped:
+  ~270 ms at 226k tokens and 725-768 ms at a ~619k-token agent turn (a second stream's longest gap, three Sparks).
+  Every tokenizer call in the server now goes through one helper that uses `encode_batch_fast` on the one text:
+  the same ids (`tools/tokenize_check.py`: real code and prose files, filler, every added token, random Unicode,
+  edge cases, both `add_special_tokens` values, and no `encode` call left in `server.py`), the GIL released (a
+  counting thread keeps 93-99% of its rate, against ~1% under `encode`) and ~30% faster (689k tokens: 799-825 ms
+  -> 559-593 ms). Requests with pictures or clips (`GlmVision.prepare`) tokenize the same way: the same ids, picture
+  positions and content hash (`tools/vision_tokenize_check.py`), and a counting thread's longest gap at ~784k tokens
+  749 -> 8 ms.
 - **A decode window's latent attention in CUDA at three Sparks** (patch `0108-glm-seg-chunks-cuda`, by
   [BadAd84](https://github.com/BadAd84)): `seg_chunks.cu` computes every chunk partial of `_seg_chunks` with the Triton kernel's own
   instruction sequence (patch 0106's chains, in `_seg_chunks`' kWidth-4 dot layout and p-sum tree; key
