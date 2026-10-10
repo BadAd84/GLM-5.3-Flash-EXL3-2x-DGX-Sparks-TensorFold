@@ -205,3 +205,4 @@ If you believe something here is missing or credited wrongly, please open an iss
   by [BadAd84](https://github.com/BadAd84).
 - `0107-glm-decode-indexer` (a decode window's indexer: the scoring in CUDA, the selection in one pass): by
 - `0104-glm-seg-attention-tp3-tiles` (32-head tiles from 5 rows at 17-24 heads): by [BadAd84](https://github.com/BadAd84).
+- `0108-glm-seg-chunks-cuda` (a decode window's latent attention chunk pass in CUDA): by [BadAd84](https://github.com/BadAd84).

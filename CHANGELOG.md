@@ -5,6 +5,16 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A decode window's latent attention in CUDA at three Sparks** (patch `0108-glm-seg-chunks-cuda`, by
+  [BadAd84](https://github.com/BadAd84)): `seg_chunks.cu` computes every chunk partial of `_seg_chunks` with the Triton kernel's own
+  instruction sequence (patch 0106's chains, in `_seg_chunks`' kWidth-4 dot layout and p-sum tree; key
+  tiles past a chunk's last key, which Triton runs fully masked, are skipped): the same bits under Triton 3.7, and
+  Triton's `_merge` reads them as before. FP8 arenas with 17-24 heads a rank (22 / 21 at TP=3); 32 heads
+  keep Triton. One GB10, the whole call at 4 streams x 8 rows at 596k: 242.5 -> 94.8 us a call (x11 layers a round). Live on three Sparks:
+  real code / prose rounds 46.90 / 37.40 -> 46.35 / 37.00 ms. Built when the engine starts; under another
+  Triton release (`sparse.TRITON_PTX`), or when the build fails, the Triton kernel serves (logged once).
+  `TF_GLM_SEG_CHUNKS_CUDA=0`: Triton. Applies after `0104`, `0105` and `0106`. GPU check:
+  `tools/seg_chunks_check.py`.
 - **Three-Spark decode attention in one wave** (patch `0104-glm-seg-attention-tp3-tiles`, by [BadAd84](https://github.com/BadAd84)):
   `seg_head_block` gave 32-head tiles from 8 rows, sized for two Sparks' 32 heads a rank. At three Sparks
   (22 / 21 heads) the 16-head tiles are two programs a row and chunk, so from 5 rows they pass the GB10's
