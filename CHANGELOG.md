@@ -16,6 +16,13 @@ Every change to this recipe, newest first. Each release names the image it serve
   66.8-67.0 -> 67.9-68.2 tok/s (38.0 -> 37.3 ms a round), code 88.8-91.1 -> 89.2-92.3 (overlapping), four at 596k
   133.7-133.9 -> 134.7-134.9; `0092`'s check and retry is kept. `TF_GLM_DRAFT_PRELAUNCH=0` turns it off. GPU check:
   `tools/draft_prelaunch_check.py`.
+- **kindling spark-os: the server starts** (patch `0098-glm-mmap-uploads`, by [BadAd84](https://github.com/BadAd84)):
+  on kindling's 64 KiB-page kernel a pageable copy to the GPU straight from a safetensors mmap hangs in the driver
+  (`cuMemcpyHtoDAsync`) once the process holds GPU memory, and the DFlash2 drafter and the GLM vision tower load
+  after the main weights. v1.10 on three Sparks with kindling spark-os 0.9.5 stopped after the drafter timings (no
+  vision line for 15 minutes, every rank spinning); with the patch it serves in 145 s. Both loaders now copy each
+  tensor out of the mmap first (`.clone()`): the same bytes, one host copy a tensor at start; the main weights use
+  direct reads and never had the problem. CPU check: `tools/mmap_upload_check.py` (fails on the unpatched loaders).
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
