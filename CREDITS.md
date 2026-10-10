@@ -139,7 +139,8 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   [kindling spark-os](https://github.com/kindlingai/kindling-spark-os) by Matt Mastracci (Kindling AI). Nothing of
   dispram ships here: the ranks import the host's client (`python/dispram.py`, GPL-3.0 with a bundling exception)
   mounted read-only at run time and talk to `dispramd` (AGPL-3.0) over its socket.
-- `0102-glm-prompt-matmul-tile` (a prompt chunk's dense projections on tile 9 or 3): by [BadAd84](https://github.com/BadAd84).
+- `0098-glm-mmap-uploads` (the drafter's and the vision tower's tensors copied out of the safetensors mmap before
+  they go to the GPU: kindling spark-os's 64 KiB-page kernel): by [BadAd84](https://github.com/BadAd84).
 - `0090-glm-expert-launch-order` (`TF_GLM_EXL3_DEC_ORDER`: the launch order of the expert decode kernel's blocks): by
   Lukasz Raczylo ([lukaszraczylo](https://github.com/lukaszraczylo)), in
   [PR #95](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/95).
@@ -198,3 +199,4 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   128 GB unified memory), two of them linked by their ConnectX-7 ports: every number in the README was measured there.
 
 If you believe something here is missing or credited wrongly, please open an issue.
+- `0102-glm-prompt-matmul-tile` (a prompt chunk's dense projections on tile 9 or 3): by [BadAd84](https://github.com/BadAd84).

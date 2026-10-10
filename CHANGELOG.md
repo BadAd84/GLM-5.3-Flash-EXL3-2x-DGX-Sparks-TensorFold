@@ -11,6 +11,13 @@ Every change to this recipe, newest first. Each release names the image it serve
   blocks, else tile 3. A tile only picks which warp computes an output, so the bits are the same. A
   2,048-row chunk's dense projections on one GB10: 178.1 -> 152.2 ms at TP=3 shapes, 238.1 -> 200.7 ms at
   TP=2 shapes. `TF_GLM_PROMPT_TILE=0`: tile 0. GPU check: `tools/prompt_tile_check.py`.
+- **kindling spark-os: the server starts** (patch `0098-glm-mmap-uploads`, by [BadAd84](https://github.com/BadAd84)):
+  on kindling's 64 KiB-page kernel a pageable copy to the GPU straight from a safetensors mmap hangs in the driver
+  (`cuMemcpyHtoDAsync`) once the process holds GPU memory, and the DFlash2 drafter and the GLM vision tower load
+  after the main weights. v1.10 on three Sparks with kindling spark-os 0.9.5 stopped after the drafter timings (no
+  vision line for 15 minutes, every rank spinning); with the patch it serves in 145 s. Both loaders now copy each
+  tensor out of the mmap first (`.clone()`): the same bytes, one host copy a tensor at start; the main weights use
+  direct reads and never had the problem. CPU check: `tools/mmap_upload_check.py` (fails on the unpatched loaders).
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
