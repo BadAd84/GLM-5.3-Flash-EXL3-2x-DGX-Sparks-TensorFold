@@ -5,6 +5,17 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **The next draft pass starts at a round's end** (patch `0100-glm-draft-prelaunch`, by
+  [BadAd84](https://github.com/BadAd84)): a decode round asked for its DFlash2 drafts only after rank 0 had emitted
+  the last round's tokens, planned the next round and sent its message, so the GPU sat idle meanwhile (an nsys
+  trace on three Sparks: 0.47 ms a round between the taps update and the message gather, 0.74 ms at 4 streams). Now
+  every rank launches the next round's block pass at the end of the round, from state every rank holds (never
+  rank 0's own stop decisions), and the next round waits for it when its streams, pending tokens and contexts
+  match (a context's every change bumps its generation), else runs its own pass. The same inputs give the same
+  candidates: every digest equal, drafted and serial alike. Three Sparks, `PARALLEL=4`: one stream's prose
+  66.8-67.0 -> 67.9-68.2 tok/s (38.0 -> 37.3 ms a round), code 88.8-91.1 -> 89.2-92.3 (overlapping), four at 596k
+  133.7-133.9 -> 134.7-134.9; `0092`'s check and retry is kept. `TF_GLM_DRAFT_PRELAUNCH=0` turns it off. GPU check:
+  `tools/draft_prelaunch_check.py`.
 - **No stall at a long request's start** (patch `0099-glm-tokenize-nogil`, by [BadAd84](https://github.com/BadAd84)):
   the server tokenized each prompt with the tokenizer's `encode`, which holds Python's GIL for the whole text (~1.2
   us a token), so while a long prompt was being tokenized the engine loop, and every other stream with it, stopped:
