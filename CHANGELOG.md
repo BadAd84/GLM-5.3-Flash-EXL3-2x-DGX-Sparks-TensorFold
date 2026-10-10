@@ -12,6 +12,13 @@ Every change to this recipe, newest first. Each release names the image it serve
   Sparks, `PARALLEL=4`, a 35k-token reply streaming meanwhile: a warm +20k turn on a 596k conversation 15.6-15.7 ->
   14.0-14.1 s, a cold ~256k prompt 132.2-132.6 -> 113.4-114.0 s; the reply's gaps during the fill median 13-15 /
   p99 20-25 / max 25-67 ms either way. `FILL_ROWS=1024` restores the old size. CPU check: `tools/fill_rows_check.py`.
+- **kindling spark-os: the server starts** (patch `0098-glm-mmap-uploads`, by [BadAd84](https://github.com/BadAd84)):
+  on kindling's 64 KiB-page kernel a pageable copy to the GPU straight from a safetensors mmap hangs in the driver
+  (`cuMemcpyHtoDAsync`) once the process holds GPU memory, and the DFlash2 drafter and the GLM vision tower load
+  after the main weights. v1.10 on three Sparks with kindling spark-os 0.9.5 stopped after the drafter timings (no
+  vision line for 15 minutes, every rank spinning); with the patch it serves in 145 s. Both loaders now copy each
+  tensor out of the mmap first (`.clone()`): the same bytes, one host copy a tensor at start; the main weights use
+  direct reads and never had the problem. CPU check: `tools/mmap_upload_check.py` (fails on the unpatched loaders).
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
