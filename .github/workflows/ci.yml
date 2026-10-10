@@ -24,8 +24,10 @@ jobs:
         run: |
           MD="$RUNNER_TEMP/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold/snapshots/rev"
           mkdir -p "$MD"
-          curl -fsSL -o "$MD/chat_template.jinja" \
-            https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold/resolve/main/chat_template.jinja
+          B=https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold/resolve/main
+          for f in chat_template.jinja tokenizer_config.json tokenizer.json; do
+            curl -fsSL -o "$MD/$f" "$B/$f"
+          done
           python tools/test_chunked_bodies.py --source-root /tmp/tf/src
           python tools/test_effort_tail.py  --source-root /tmp/tf/src --model-dir "$MD"
       - name: Image pin matches the patch set
