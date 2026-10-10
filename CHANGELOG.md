@@ -5,6 +5,12 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **Three-Spark decode attention in one wave** (patch `0104-glm-seg-attention-tp3-tiles`, by [BadAd84](https://github.com/BadAd84)):
+  `seg_head_block` gave 32-head tiles from 8 rows, sized for two Sparks' 32 heads a rank. At three Sparks
+  (22 / 21 heads) the 16-head tiles are two programs a row and chunk, so from 5 rows they pass the GB10's
+  48 SMs and run in two waves. A rank of 17 to 24 heads now takes 32-head tiles from 5 rows; 16 and 32 heads
+  keep 8. The chunk pass at 5 / 6 / 7 rows on one GB10: 92.4 / 103.3 / 108.1 -> 65.3 / 65.9 / 66.4 us a
+  call; the same bits. GPU check: `tools/seg_head_block_check.py`.
 - **A decode window's indexer, twice as fast with four agents** (patch `0107-glm-decode-indexer`, by [BadAd84](https://github.com/BadAd84)):
   the same tokens and counts in less time. (1) The Triton scoring's grid is 512 programs a segment (was
   256). (2) Segments of 4 or more rows are scored by `seg_scores.cu`, which stores `_seg_scores`' scores
