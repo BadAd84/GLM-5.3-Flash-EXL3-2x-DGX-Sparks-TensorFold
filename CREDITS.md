@@ -219,3 +219,16 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   128 GB unified memory), two of them linked by their ConnectX-7 ports: every number in the README was measured there.
 
 If you believe something here is missing or credited wrongly, please open an issue.
+- `0101-glm-prompt-select-floor` (a prompt chunk's pool selection from one pass over the scores): by
+- `0105-glm-prompt-scores-cuda` (a prompt chunk's indexer scoring in CUDA, Triton's instruction order): by
+- `0106-glm-sparse-onepass-cuda` (a prompt chunk's sparse attention in CUDA, Triton's instruction order):
+  by [BadAd84](https://github.com/BadAd84).
+- `0107-glm-decode-indexer` (a decode window's indexer: the scoring in CUDA, the selection in one pass): by
+- `0104-glm-seg-attention-tp3-tiles` (32-head tiles from 5 rows at 17-24 heads): by [BadAd84](https://github.com/BadAd84).
+- `0108-glm-seg-chunks-cuda` (a decode window's latent attention chunk pass in CUDA): by [BadAd84](https://github.com/BadAd84).
+- `0115-glm-unoffered-tool-call` (a call to a tool the request did not offer, reported): its report adapted from
+  [BadAd84](https://github.com/BadAd84)'s `0114-glm-tool-call-rejections` (#137).
+- `0100-glm-draft-prelaunch` (the next round's DFlash2 block pass launched at a decode round's end,
+  `TF_GLM_DRAFT_PRELAUNCH`): by [BadAd84](https://github.com/BadAd84).
+- `0102-glm-prompt-matmul-tile` (a prompt chunk's dense projections on tile 9 or 3): by [BadAd84](https://github.com/BadAd84).
+- `0103-glm-qmm-decode-noclusters` (decode matmuls reduce through the partials buffer at few rows): by
