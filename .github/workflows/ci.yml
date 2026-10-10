@@ -20,6 +20,14 @@ jobs:
             echo "applying $(basename "$p")"
             patch -p0 --forward < "$p" > /dev/null || { echo "::error::$(basename "$p") does not apply to TensorFold v0.6.0"; exit 1; }
           done
+      - name: Self-contained tools tests (against the patched tree)
+        run: |
+          MD="$RUNNER_TEMP/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold/snapshots/rev"
+          mkdir -p "$MD"
+          curl -fsSL -o "$MD/chat_template.jinja" \
+            https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold/resolve/main/chat_template.jinja
+          python tools/test_chunked_bodies.py --source-root /tmp/tf/src
+          python tools/test_effort_tail.py  --source-root /tmp/tf/src --model-dir "$MD"
       - name: Image pin matches the patch set
         run: |
           # image_hash() from scripts/config.sh: sha256(cat patches/*.patch + IMAGE_EXTRAS)[:12]
@@ -31,11 +39,3 @@ jobs:
             echo "::error::IMAGE_TAG ($T) does not match the current patch set (v0.6.0-$H). Publish an image for this patch set or bump the pin."
             exit 1
           fi
-      - name: Self-contained tools tests (against the patched tree)
-        run: |
-          MD="$RUNNER_TEMP/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold/snapshots/rev"
-          mkdir -p "$MD"
-          curl -fsSL -o "$MD/chat_template.jinja" \
-            https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold/resolve/main/chat_template.jinja
-          python tools/test_chunked_bodies.py --source-root /tmp/tf/src
-          python tools/test_effort_tail.py  --source-root /tmp/tf/src --model-dir "$MD"
