@@ -5,6 +5,17 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A decode window's indexer, twice as fast with four agents** (patch `0107-glm-decode-indexer`, by [BadAd84](https://github.com/BadAd84)):
+  the same tokens and counts in less time. (1) The Triton scoring's grid is 512 programs a segment (was
+  256). (2) Segments of 4 or more rows are scored by `seg_scores.cu`, which stores `_seg_scores`' scores
+  with patch 0105's instruction sequence (the same bits under Triton 3.7) while a CTA converts each FP8 key tile once for up to 8 of the
+  segment's rows; fewer rows stay on Triton (memory-bound there). (3) Windows of 8 or more rows select
+  each row's pools by `_seg_select_floor`, one pass over its scores (patch 0101's method), instead of
+  `select_split`'s five. The indexer call on one GB10, 4 streams x 8 rows at 596k: 1,296 -> 647 us
+  (x11 layers a round); 1 x 16 rows 635 -> 344 us. Live on three Sparks with four agents at ~596k, every
+  stream's round -2 to -4%. Under another Triton release (`sparse.TRITON_PTX`), or when the build fails, the
+  Triton scoring serves (logged once). `TF_GLM_SEG_SCORES_CUDA=0` / `TF_GLM_SEG_SELECT_FLOOR=0`: the old scoring /
+  selection. Applies after `0101`, `0105` and `0106`. GPU check: `tools/decode_indexer_check.py`.
 - **A prompt chunk's sparse attention in CUDA at three Sparks** (patch `0106-glm-sparse-onepass-cuda`, by
   [BadAd84](https://github.com/BadAd84)): `sparse_onepass.cu` computes every output of `_sparse_onepass` with the Triton kernel's own
   instruction sequence, read from its PTX (the mma chains and their K order, the online softmax's roundings

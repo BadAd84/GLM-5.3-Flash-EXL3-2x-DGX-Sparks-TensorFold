@@ -203,3 +203,4 @@ If you believe something here is missing or credited wrongly, please open an iss
 - `0105-glm-prompt-scores-cuda` (a prompt chunk's indexer scoring in CUDA, Triton's instruction order): by
 - `0106-glm-sparse-onepass-cuda` (a prompt chunk's sparse attention in CUDA, Triton's instruction order):
   by [BadAd84](https://github.com/BadAd84).
+- `0107-glm-decode-indexer` (a decode window's indexer: the scoring in CUDA, the selection in one pass): by
