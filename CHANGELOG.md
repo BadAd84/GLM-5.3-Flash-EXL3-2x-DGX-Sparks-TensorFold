@@ -36,6 +36,14 @@ Every change to this recipe, newest first. Each release names the image it serve
   cold request of 50 full-size pictures (102,118 tokens) answers and resumes. Pictures past the 8th are no longer
   downscaled, so they cost up to 2,048 tokens each. `TENSORFOLD_GLM_REQUEST_IMAGE_TOKENS=16384` restores the shared
   budget. No patch and no image change. CPU check: `tools/picture_budget_check.py`.
+- **Streamed replies keep the connection alive while they wait** (patch `0111-server-sse-keepalive`, issue #106,
+  reported with the first version of the patch by [stevehansen](https://github.com/stevehansen)): a streamed reply
+  sent nothing between its first event and its first token, so a request waiting for a lane or filling a long prompt
+  was silent for minutes, and a proxy in front cut it as idle (reported: behind a Cloudflare Tunnel every such stream
+  ended at ~125 s). Now a stream that has sent nothing for `SSE_KEEPALIVE_S` seconds (15) writes an SSE comment line,
+  `: keepalive`, on the chat, completions, Messages and Responses streams; SSE clients skip comment lines, and the
+  events are the same bytes. `SSE_KEEPALIVE_S=0` turns it off; a value that is not a number of seconds stops the
+  server at start. Non-streamed replies are unchanged. CPU test: `tools/test_sse_keepalive.py`.
 - **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
   while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
   half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at
