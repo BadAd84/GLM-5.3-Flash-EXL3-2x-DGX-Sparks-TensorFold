@@ -330,12 +330,15 @@ How it stores (`PARALLEL` above 1):
   bytes equal one already on disk is linked to it instead of written again.
 - **Written when kept, so it survives a crash.** Only a kept state's small part (its recurrences and DFlash2 window)
   and the block its end cuts (whose last pooled-key row is still filling) are copied off the GPU when it is kept; its
-  other rows go to disk a few blocks between rounds through a pinned ring, written with O_DIRECT (the page cache
-  shares a GB10's memory). A conversation resumes from disk after an eviction, a clean restart, a `kill -9` or a
+  other rows go to disk a few blocks between rounds through a pinned ring (`TF_GLM_SPILL_STAGE_MIB`, 256 MiB),
+  written with O_DIRECT (the page cache shares a GB10's memory). A conversation resumes from disk after an eviction, a clean restart, a `kill -9` or a
   watchdog restart. A clean stop writes what still waits (`SPILL_FLUSH_S`, 60 s).
-- **Reads beside decoding.** A restore reads its blocks on 8 threads, checks each against its CRC-32, and copies them
-  into the pool on its own CUDA stream while the other requests keep decoding; a file that fails is dropped on every
-  Spark and the prompt is prefilled. Rank 0 asks every Spark before a read; a read happens only when all hold the state.
+- **Reads beside decoding.** A restore reads its blocks ahead on 8 threads into pinned slots
+  (`TF_GLM_SPILL_READ_BLOCKS`, 32 blocks: 388 MiB on two Sparks, pinned before the pool is sized, so the pool is
+  ~60k tokens smaller rather than the margin it keeps), checks each against its CRC-32, and the engine copies the blocks read into the
+  pool between rounds (at most `TF_GLM_SPILL_LOAD_MS`, 40 ms, a gap), so the other requests keep decoding and the read
+  never waits for them (copies issued from the reader's own thread waited on the decode loop for every call); a file
+  that fails is dropped on every Spark and the prompt is prefilled. Rank 0 asks every Spark before a read; a read happens only when all hold the state.
 - **Pictures** (`PARALLEL` above 1): stored under their content keys, so a request resumes one only with the same
   pictures in the same places.
 
@@ -372,6 +375,7 @@ Two Sparks, `PARALLEL=8`, `SPILL_GIB=64`, every reply compared to a fresh `draft
 | 4 conversations growing 30k to 45k tokens over 7 turns each, at once | decode 27.99 tok/s together with the tier on and off; 1.2 GiB written for 28 kept states; dirty pages as with it off |
 | A picture prompt across a clean restart | resumed, same reply |
 | Restore of a 40k-token state | 147 ms (median) |
+| Restore of a 260k-token state beside a decoding stream | 0.54-0.61 s (idle 0.40-0.46 s; 1.0-1.3 s with the copies on the reader's thread; 0.87 s with 16 read-ahead blocks, 0.69 s with 24); its first token 1.3-1.4 s; the decoding stream 46.2-46.3 tok/s (46.4 without the read) |
 | An agent rewinding its last two rounds every 4th of 16 (~110k tokens, issue #104), 6 chats filling the cache | the 3 rewinds prefilled 22, 66 and 67 tokens (before: 22, 109,186 and 4,227); same replies |
 
 Files: `spill-<build>/rank<N>/blocks/` (about 6.2 MB a 1,000 tokens a Spark) and `points/` (each state's ids and
@@ -590,6 +594,8 @@ sets a value wins: the environment, then `scripts/local.sh`, then `.env`, then t
 | `TF_GLM_CACHE_ENTRIES` | `32` | kept prompt states at most (TensorFold's default is 8); past this count a conversation's earlier (superseded) states go first, then the least recently used, however much of the pool is free (patch `0063`, @Alexbob0); shared-prefix states (a system block) go by recency only, so a new run of an agent still finds its system prompt (patch `0077`, issue #75, @meleesciony). An agent request keeps 1 to 3 (issue #17); each costs ~45 MiB at start, reserved out of the pool's `KV_POOL_GIB` budget (the pool shrinks by it, the estimate does not change), flat in the context length. Symptom of too few: `/health` `kept_prompts` stuck at the count while `pool_free_tokens` is large (issue #84, @jdecker76); see `TF_GLM_CACHE_SHARE_PCT` |
 | `TF_GLM_CACHE_SHARE_PCT` | `0` (off) | make the kept-state count at least this share of the `KV_POOL_GIB` budget (patch `0097`, issue #84 by @jdecker76): on two Sparks at the defaults each state reserves ~91 MiB of a ~7.5 GiB budget, so 32 states already take ~38%: `50` gives ~42 states, the ceiling ~63 (each costs pool tokens), so the pool's tokens, not 32 finished one-shot conversations, decide when a live conversation goes. Any count is cut to three quarters of the budget (logged at start): past that the reservation would exceed the estimate. Set the same on every Spark |
 | `TF_GLM_KEPT_BYTES_GIB` | `0` (no cap) | a byte budget for the kept states together (patch `0089`, by Thomas Wade, [ThomasWadeZ](https://github.com/ThomasWadeZ), PR #65): the device memory they own outside the pool (recurrent state, DFlash2 window copies: hundreds of MB each with long contexts); past it states are dropped in the entry cap's order (not written to the spill tier) and freed blocks go back to the driver. The author runs `4`; `kept_bytes` / `kept_bytes_cap` in `/health` |
+| `TF_GLM_SPILL_READ_BLOCKS` / `TF_GLM_SPILL_STAGE_MIB` | `32` / `256` | the spill tier's pinned host memory: the blocks restores read ahead into (beside a decoding stream a restore moves at most this many a round; 12.1 MiB each on two Sparks, so 388 MiB, printed at start), and the ring writes go through, in MiB ([Spill tier](#spill-tier-optional)) |
+| `TF_GLM_SPILL_LOAD_MS` | `40` | the most a restore's copies take between two rounds while other requests decode (an idle server copies the rest at once) |
 | `TF_GLM_KEEP_PER_CHAT` | `0` (no limit) | at most this many of one conversation's own turn-boundary kept states (patch `0089`, PR #65); shared-prefix and mid-prefill states do not count, the older turns are dropped without a spill. The author runs `2`; `kept_mix` in `/health` shows each conversation's count |
 | `TF_GLM_MULTI_WATCHDOG_S` / `TF_GLM_MULTI_WATCHDOG_EXIT` | `300` / `0` | a rank stuck this many seconds in one step prints every thread's stack to its log (`/health`'s `iteration_s` shows how long the current step has run); `EXIT=1`: the server then exits (code 1) instead of waiting, so a supervisor can restart it. Both ranks also check that they received the same message each step, and stop with an error naming it if not |
 | `TF_GLM_CLEAR_THINKING` | `0` | `1`: drop earlier turns' reasoning from the prompt, as the checkpoint's template does (agents then prefill the previous turn's tool loop again); a request's `chat_template_kwargs.clear_thinking` wins |

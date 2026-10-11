@@ -3,16 +3,18 @@
 # forks share (named by a hash chained over the ids and salted with the lineage; equal bytes linked), through a
 # pinned ring between rounds, so it survives an eviction, a restart and a crash. Room goes by conversation: old turns,
 # abandoned forks, whole conversations, shared prefixes last; an optional per-conversation quota; the free-disk
-# floor. Reads beside decoding, after every rank says it holds the state (HAS). A request whose prefix another one is
-# still prefilling waits for that state (TF_GLM_PREFIX_WAIT). New tensorfold/cuda/spill_blocks.py (no model code).
+# floor. Reads beside decoding, after every rank says it holds the state (HAS): reader threads read and check blocks
+# into pinned slots, the engine copies them between rounds (TF_GLM_SPILL_LOAD_MS; LOADPART takes rank 1 as far). A
+# request whose prefix another one is still prefilling waits for that state (TF_GLM_PREFIX_WAIT). New
+# tensorfold/cuda/spill_blocks.py (no model code).
 # Block layout, lineage, write-at-keep ring, release and fsync order: PR #118 by @BadAd84; eviction by conversation
 # for issue #122, reported by @xiepengqi; the rest by @wojo. Builds on 0088-glm-spill-tier. Apache-2.0.
 diff --git tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
 new file mode 100644
-index 0000000..5b5347a
+index 0000000..86b3da2
 --- /dev/null
 +++ tensorfold/cuda/spill_blocks.py
-@@ -0,0 +1,1585 @@
+@@ -0,0 +1,1674 @@
 +"""The spill tier's block store for a shared pool of cache rows (``tensorfold serve --spill-gib`` with several streams):
 +every kept prompt state is written to this rank's disk when it is kept, so it survives an eviction, a restart and a
 +crash, and a later request that extends the same tokens reads it back instead of prefilling them.
@@ -38,9 +40,11 @@ index 0000000..5b5347a
 +end cuts (a pooled-key row there is still filling), are copied to the host; its other rows stay in the pool until
 +written. Between rounds the engine calls ``pump`` (a few blocks a call, one gather and one copy each), the writer
 +thread writes each slot, then frees it; at idle ``drain`` writes the rest. Rows about to be freed or overwritten while
-+still waiting are copied to the host at once (``release``). Reads run on a reader thread (blocks read ahead on several
-+threads, each checked against its CRC-32) and copy into the pool on their own CUDA stream, so other streams keep
-+decoding; rows a memcpy may not reach (patch 0072's display span) go by kernel.
++still waiting are copied to the host at once (``release``). Reads run on a reader thread (blocks read ahead into
++pinned slots on several threads, each checked against its CRC-32); the engine copies the blocks read into the pool
++between rounds (``step``), so other streams keep decoding and no CUDA work is issued off the engine's thread (a reader
++issuing copies beside a decoding stream waited for the engine on every call, ~0.25 ms each); rows a memcpy may not
++reach (patch 0072's display span) go by kernel.
 +
 +Every rank keeps its own disk and decides alone what to keep there; the engine asks every rank before a read
 +(``has``) and drops a state everywhere when any rank's read fails its checks.
@@ -63,9 +67,9 @@ index 0000000..5b5347a
 +the fsync order are the NVMe KV tier of MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold pull request #118,
 +authored by BadAd84 (https://github.com/BadAd84), carried over here. The spill tier around it (``spill.py``, patch
 +0088), lineage forks at each resume point, eviction by conversation and the quota (issue #122, reported by xiepengqi,
-+https://github.com/xiepengqi), the free-disk floor making room in that order, content dedup by hard link, reads on a
-+CUDA stream beside decoding after every rank's HAS, and pictures by content keys are by wojo (Robert Wojciechowski,
-+https://github.com/wojo)."""
++https://github.com/xiepengqi), the free-disk floor making room in that order, content dedup by hard link, reads beside
++decoding after every rank's HAS (copied between rounds, as #118 does), and pictures by content keys are by wojo
++(Robert Wojciechowski, https://github.com/wojo)."""
 +
 +from __future__ import annotations
 +
@@ -92,6 +96,38 @@ index 0000000..5b5347a
 +
 +FORMAT = "tensorfold-cuda-spill-blocks-1"
 +READERS = 8                    # blocks read at once on a load (cold NVMe reads scale with the reads in flight)
++READ_BLOCKS = 32               # TF_GLM_SPILL_READ_BLOCKS: blocks loads read ahead into pinned slots (GLM on two
++                               # Sparks: 12.1 MiB a block, 388 MiB): a slot is free again only once the engine copied it
++                               # out, between rounds, so beside a decoding stream a load moves at most this many a round
++STAGE_MIB = 256                # TF_GLM_SPILL_STAGE_MIB: the pinned ring writes go through (at least two blocks)
++
++
++def read_blocks() -> int:
++    """TF_GLM_SPILL_READ_BLOCKS: the blocks a load reads ahead into (at least one a reader thread)."""
++
++    return max(READERS, _count("TF_GLM_SPILL_READ_BLOCKS", READ_BLOCKS, "blocks"))
++
++
++def pin_read_ahead(block_bytes: int) -> int:
++    """The engine, before it sizes its pool from the memory left: the read-ahead's pinned slots, ``read_blocks()`` of
++    ``block_bytes`` each (in place of ``spill.preallocate``'s read buffers), so the pool gets what they leave instead
++    of their coming out of the margin it keeps. The bytes pinned."""
++
++    per = _up(block_bytes)
++    pin = torch.cuda.is_available()
++    _sp._PINNED["read"] = [torch.empty(per, dtype=torch.uint8, pin_memory=pin) for _ in range(read_blocks())]
++    return per * read_blocks()
++
++
++def _count(name: str, default: int, unit: str) -> int:
++    raw = str(os.environ.get(name, "") or "").strip() or str(default)
++    try:
++        n = int(raw)
++    except ValueError:
++        n = 0
++    if n < 1:
++        raise ValueError(f"{name}: whole {unit} >= 1, not {raw!r}")
++    return n
 +PUMP_BLOCKS = 4                # at most this many blocks a pump (one call between two rounds, on the engine loop)
 +BACKLOG = 16 << 30             # bytes of rows waiting to be written past which a new state is not queued
 +TURNS = 4                      # newest states kept on a conversation's path; older turns go once a newer one is written
@@ -356,22 +392,26 @@ index 0000000..5b5347a
 +
 +
 +class LoadJob:
-+    """A read on the reader thread: ``done`` once every block is on the device (``event`` recorded on the reader's
-+    stream) and the small state is read, or the read failed (``error``; ``bad`` / ``lost``: the blocks that failed
-+    here, damaged or missing). ``where``: the extent it reads into, whose base is read as each block is copied (it may
-+    move: ``moving``)."""
++    """A read: the reader thread reads its blocks into pinned slots (checked against their CRC-32) and its small state;
++    the engine copies each block read into ``where`` at its base then (``step``: between rounds, on the engine's
++    stream; the extent may move between two steps). ``queued``: block index -> (slot, bytes, its read's future, its
++    tokens, its name); ``next``: the blocks copied. ``done`` once the reader is through, or the read failed
++    (``error``; ``bad`` / ``lost``: the blocks that failed here, damaged or missing); ``stop``: the engine gave up on
++    it, the reader stops."""
 +
 +    def __init__(self, point: Point, where) -> None:
 +        self.point, self.where = point, where
-+        self.lock = threading.Lock()                       # held while a block's copies are issued, and over a move
-+        self.last = None                                   # the reader stream's event after its latest copies
-+        self.moved = None                                  # the engine's event after the extent's latest move
++        self.cond = threading.Condition()
++        self.queued: dict[int, tuple] = {}
++        self.next = 0
++        self.total = len(point.blocks) if point is not None else 0
++        self.stop = False
 +        self.done = threading.Event()
 +        self.error: BaseException | None = None
 +        self.bad: set[str] = set()                          # blocks whose bytes failed (every name of them)
 +        self.lost: set[str] = set()                         # blocks whose file is gone (that name)
-+        self.event = None
 +        self.small = None
++        self.stage = None
 +        self.t0 = time.perf_counter()
 +
 +
@@ -382,6 +422,8 @@ index 0000000..5b5347a
 +                 signature: str = "", weights: str = "", model_id: str = "", gather=None, classes: Sequence[str] = (),
 +                 quiet: bool = False, turns: int = TURNS, quota: float = 0.0) -> None:
 +        self.cfg, self.planes, self.block = cfg, list(planes), int(block)
++        self.read_blocks = read_blocks()
++        self.stage_mib = _count("TF_GLM_SPILL_STAGE_MIB", STAGE_MIB, "MiB")
 +        for p in self.planes:
 +            if self.block % p.div:
 +                raise ValueError(f"--spill-gib: a cache plane of {p.div} tokens a row does not divide {self.block}")
@@ -466,7 +508,9 @@ index 0000000..5b5347a
 +        if self.rank == 0 and not quiet:
 +            print(f"[tensorfold] spill: {self.top} ({cfg.gib:g} GiB a rank, blocks of {self.block} tokens, written "
 +                  f"when kept, from {cfg.min_tokens} tokens{', O_DIRECT' if self.direct else ''}, floor "
-+                  f"{cfg.min_free_gib:g} GiB free): {len(self.index)} stored prompts from before this start, "
++                  f"{cfg.min_free_gib:g} GiB free, {self.read_blocks} blocks read ahead "
++                  f"({self.read_blocks * _span_bytes(self.planes, 0, self.block) / (1 << 20):.0f} MiB), a "
++                  f"{self.stage_mib} MiB write ring): {len(self.index)} stored prompts from before this start, "
 +                  f"{self.stored() / (1 << 30):.1f} GiB"
 +                  + (f"; pruned {pruned_builds} older builds" if pruned_builds else ""), flush=True)
 +
@@ -628,8 +672,16 @@ index 0000000..5b5347a
 +                out.append(torch.empty(per, dtype=torch.uint8, pin_memory=pin))
 +            return out
 +
-+        self.slots = carve(_sp._PINNED.get("write") or [], max(2, (256 << 20) // per))
-+        self.read_slots = carve(_sp._PINNED.get("read") or [], READERS)
++        self.slots = carve(_sp._PINNED.get("write") or [], max(2, (self.stage_mib << 20) // per))
++        early = sum(b.numel() // per for b in _sp._PINNED.get("read") or [])
++        self.read_slots = carve(_sp._PINNED.get("read") or [], self.read_blocks)
++        if early < self.read_blocks and self.rank == 0:
++            print(f"[tensorfold] spill: {self.read_blocks - early} of {self.read_blocks} read-ahead slots pinned after "
++                  "the pool was sized (from the margin it keeps)", flush=True)
++        self.free_reads: queue.Queue = queue.Queue()
++        for i in range(len(self.read_slots)):
++            self.free_reads.put(i)
++        self.read_events: list = []                         # (slot, the engine's event after its copy out of it)
 +        for s in self.slots + self.read_slots:
 +            s.fill_(0)
 +        if any(s.data_ptr() % _sp.ALIGN for s in self.slots + self.read_slots):
@@ -1253,18 +1305,12 @@ index 0000000..5b5347a
 +        return None
 +
 +    def load_async(self, key: str, where) -> LoadJob:
-+        """Start reading point ``key``'s rows into extent ``where`` (from its base when each block is copied: a move
-+        goes through ``moving``; it does not go or shrink until the read ends) and its small state, on the reader
-+        thread. A point this rank lacks fails the read."""
++        """Start reading point ``key``'s blocks and small state on the reader thread; the engine copies them into extent
++        ``where`` (``step``, ``finish_load``). A point this rank lacks fails the read."""
 +
 +        with self.lock:
 +            pt = self.index.get(key)
 +        lj = LoadJob(pt, where)
-+        if torch.cuda.is_available():
-+            lj.after = torch.cuda.Event()
-+            lj.after.record(torch.cuda.current_stream())  # the extent's rows are free to write from here
-+        else:
-+            lj.after = None
 +        if pt is None:
 +            lj.error = FileNotFoundError(f"rank {self.rank} has no stored prompt {key}")
 +            lj.done.set()
@@ -1278,17 +1324,11 @@ index 0000000..5b5347a
 +    @staticmethod
 +    @contextlib.contextmanager
 +    def moving(lj: LoadJob):
-+        """The engine, around a move of the extent ``lj`` reads into (its base changes, its rows copied on the current
-+        stream): no block's copy is issued meanwhile, the copies issued before land first (the stream waits for them),
-+        and the ones after wait for the move's copy. Neither side waits for the disk."""
++        """The engine, around a move of the extent ``lj`` reads into. Nothing to hold: its blocks are copied on the
++        engine's own stream between rounds (``step``), so the move's copy comes after the copies before it and before
++        the ones after it, which find the extent at its new base."""
 +
-+        with lj.lock:
-+            if lj.last is not None:
-+                torch.cuda.current_stream().wait_event(lj.last)
-+            yield
-+            if torch.cuda.is_available():
-+                lj.moved = torch.cuda.Event()
-+                lj.moved.record(torch.cuda.current_stream())
++        yield
 +
 +    def _read_block(self, h: str, crc: int, buf: torch.Tensor, nb: int) -> None:
 +        """A reader thread: block ``h`` into pinned ``buf`` (O_DIRECT where it works), checked against its CRC-32."""
@@ -1330,107 +1370,55 @@ index 0000000..5b5347a
 +            os.close(fd)
 +
 +    def _read_loop(self) -> None:
-+        stream = torch.cuda.Stream(device=self.device) if torch.cuda.is_available() else None
 +        while True:
 +            lj = self.reads.get()
 +            try:
-+                self._read(lj, stream)
++                self._read(lj)
 +            except BaseException as exc:                    # noqa: BLE001  (the reader never dies)
 +                lj.error = exc
 +            with self.lock:
 +                self.reading.discard(lj.point.key)
-+            lj.done.set()
++            with lj.cond:
++                lj.done.set()
++                lj.cond.notify_all()
 +            lj = None
 +
-+    def _read(self, lj: LoadJob, stream) -> None:
++    def _slot(self, lj: LoadJob) -> int | None:
++        """The reader: a free pinned slot for ``lj``'s next block (the engine frees one once its copy out of it ended),
++        or None once the engine gave up on ``lj``."""
++
++        while not lj.stop:
++            try:
++                return self.free_reads.get(timeout=0.2)
++            except queue.Empty:
++                continue
++        return None
++
++    def _read(self, lj: LoadJob) -> None:
++        """The reader: ``lj``'s blocks into pinned slots, in order, as slots come free (several read at once on the
++        reader pool, each checked against its CRC-32), then its small state. Issues no CUDA work."""
++
 +        pt = lj.point
 +        job = self.waiting.get(pt.key)
 +        if job is not None and not job.done.wait(LOAD_WAIT_S):   # (a point is only read once complete; safety)
 +            raise OSError(f"{pt.key}: its write did not end in time")
 +        self.ring()
-+        spans = []
-+        for s, e, h in block_hashes(pt.ids, self.block, pt.lineage):
-+            spans.append((s, e, h))
++        spans = list(block_hashes(pt.ids, self.block, pt.lineage))
 +        if [h for _, _, h in spans] != pt.blocks:
 +            raise Corrupt(f"{pt.key}: its block list does not match its ids and lineage")
-+        stage = None
-+        if any(p.spanned for p in self.planes):
-+            stage = _sp._stage(self.planes[0].tensor.device, stream)
-+        if stream is not None and lj.after is not None:
-+            stream.wait_event(lj.after)
-+        bufs = list(range(len(self.read_slots)))
-+        evs: dict[int, Any] = {}
-+        futs: dict[int, tuple] = {}
-+
-+        def submit(i):
-+            b = bufs.pop(0)
-+            if b in evs and evs[b] is not None:
-+                evs[b].synchronize()
-+            s, e, h = spans[i]
-+            nb = _span_bytes(self.planes, s, e)
-+            futs[i] = (b, nb, self._readers.submit(self._read_block, h, pt.crcs[i], self.read_slots[b], nb))
-+
-+        for i in range(min(len(spans), len(bufs))):
-+            submit(i)
-+        try:
-+            self._read_blocks(lj, stream, spans, futs, bufs, evs, submit, stage)
-+        except BaseException:
-+            for _, _, g in futs.values():                   # reads still running write pinned slots: they end first
-+                g.cancel()
-+            concurrent.futures.wait([g for _, _, g in futs.values()])
-+            if stream is not None:                          # copies still queued write pool rows that may go now
-+                stream.synchronize()
-+            raise
-+
-+    def _read_blocks(self, lj, stream, spans, futs, bufs, evs, submit, stage) -> None:
 +        for i, (s, e, h) in enumerate(spans):
-+            b, nb, f = futs.pop(i)
-+            try:
-+                f.result()
-+            except Exception as exc:
-+                if isinstance(exc, FileNotFoundError):     # this name is gone: its links' bytes are not in question
-+                    lj.lost.add(h)
-+                elif isinstance(exc, (Corrupt, EOFError)):  # damaged bytes, not a passing I/O error
-+                    lj.bad.add(h)
-+                if isinstance(exc, Corrupt):
-+                    self.stats["crc_failed"] += 1
-+                raise
-+            src = self.read_slots[b]
-+            at = 0
-+            ctx = torch.cuda.stream(stream) if stream is not None else None
-+            with lj.lock:                                   # (the extent stays where it is while they are issued)
-+                base = lj.where.base
-+                if ctx is not None:
-+                    ctx.__enter__()
-+                try:
-+                    if lj.moved is not None:                # after the move's own copy of the rows (``moving``)
-+                        stream.wait_event(lj.moved)
-+                        lj.moved = None
-+                    for p in self.planes:
-+                        a, z = _rows(p, s, e)
-+                        dst = p.tensor[base // p.div + a:base // p.div + z]
-+                        k = dst.numel() * dst.element_size()
-+                        v = dst.reshape(-1).view(torch.uint8)
-+                        if p.spanned:
-+                            _sp._by_kernel(v, src[at:at + k], stage, stream)
-+                        else:
-+                            v.copy_(src[at:at + k], non_blocking=stream is not None)
-+                        at += k
-+                finally:
-+                    if ctx is not None:
-+                        ctx.__exit__(None, None, None)
-+                if stream is not None:
-+                    ev = torch.cuda.Event()
-+                    ev.record(stream)
-+                    evs[b] = lj.last = ev
-+            bufs.append(b)
-+            self.stats["loaded_bytes"] += nb
-+            nxt = i + 1 + len(futs)
-+            if nxt < len(spans) and bufs:
-+                submit(nxt)
-+        self._read_small(lj, stream)
++            b = self._slot(lj)
++            if b is None:
++                return
++            nb = _span_bytes(self.planes, s, e)
++            fut = self._readers.submit(self._read_block, h, pt.crcs[i], self.read_slots[b], nb)
++            with lj.cond:
++                lj.queued[i] = (b, nb, fut, s, e, h)
++                lj.cond.notify_all()
++        if not lj.stop:
++            self._read_small(lj)
 +
-+    def _read_small(self, lj, stream) -> None:
++    def _read_small(self, lj) -> None:
 +        pt = lj.point
 +        t1 = time.perf_counter()
 +        path = self._point_path(pt.key, ".st")
@@ -1442,11 +1430,108 @@ index 0000000..5b5347a
 +        lj.small = _small_read(raw, self.classes)
 +        lj.raw = raw                                        # (the small state's tensors are views of it)
 +        self.stats["load_small_s"] += time.perf_counter() - t1
-+        if stream is not None:
-+            ev = torch.cuda.Event()
-+            ev.record(stream)
-+            lj.event = ev
-+            ev.synchronize()
++
++    # -- the engine's side of a read ---------------------------------------------------------------------------------
++    def _recycle(self, wait: bool = False) -> None:
++        """The engine: slots whose copy out ended go back to the reader (``wait``: every one, waiting for them)."""
++
++        keep = []
++        for b, ev in self.read_events:
++            if ev is None or wait or ev.query():
++                if ev is not None and wait:
++                    ev.synchronize()
++                self.free_reads.put(b)
++            else:
++                keep.append((b, ev))
++        self.read_events = keep
++
++    def step(self, lj: LoadJob, upto: int | None = None, budget: float | None = None) -> int:
++        """The engine, between rounds (either rank): ``lj``'s next blocks into its extent, at its base now, on the
++        current stream, in order. Without ``upto``: only blocks read already, for at most ``budget`` seconds; with it:
++        every block before ``upto``, waiting for their reads. A block whose read failed fails the read (``error``) and
++        stops it. The blocks copied."""
++
++        self._recycle()
++        end = lj.total if upto is None else min(int(upto), lj.total)
++        t, n = time.perf_counter(), 0
++        while lj.next < end and lj.error is None:
++            i = lj.next
++            with lj.cond:
++                if upto is None and not (i in lj.queued and lj.queued[i][2].done()):
++                    break
++                while i not in lj.queued and lj.error is None and not lj.done.is_set():
++                    lj.cond.wait(1.0)
++                item = lj.queued.pop(i, None)
++            if item is None:
++                if lj.error is None:
++                    lj.error = OSError(f"{lj.point.key}: its read ended before block {i}")
++                break
++            b, nb, fut, s, e, h = item
++            try:
++                fut.result()
++            except Exception as exc:
++                if isinstance(exc, FileNotFoundError):     # this name is gone: its links' bytes are not in question
++                    lj.lost.add(h)
++                elif isinstance(exc, (Corrupt, EOFError)):  # damaged bytes, not a passing I/O error
++                    lj.bad.add(h)
++                if isinstance(exc, Corrupt):
++                    self.stats["crc_failed"] += 1
++                lj.error = exc
++                self.free_reads.put(b)
++                break
++            self._copy_in(lj, self.read_slots[b], s, e)
++            ev = None
++            if torch.cuda.is_available() and self.read_slots[b].is_pinned():
++                ev = torch.cuda.Event()
++                ev.record(torch.cuda.current_stream())
++            self.read_events.append((b, ev))
++            lj.next += 1
++            n += 1
++            self.stats["loaded_bytes"] += nb
++            if upto is None and budget is not None and time.perf_counter() - t >= budget:
++                break
++        if lj.error is not None:
++            lj.stop = True
++        return n
++
++    def _copy_in(self, lj: LoadJob, src: torch.Tensor, s: int, e: int) -> None:
++        """The engine: one block's rows from pinned ``src`` into ``lj``'s extent at its base now (current stream)."""
++
++        stream = torch.cuda.current_stream() if torch.cuda.is_available() and src.is_pinned() else None
++        base = lj.where.base
++        at = 0
++        for p in self.planes:
++            a, z = _rows(p, s, e)
++            dst = p.tensor[base // p.div + a:base // p.div + z]
++            k = dst.numel() * dst.element_size()
++            v = dst.reshape(-1).view(torch.uint8)
++            if p.spanned:
++                if lj.stage is None:
++                    lj.stage = _sp._stage(self.planes[0].tensor.device, stream)
++                _sp._by_kernel(v, src[at:at + k], lj.stage, stream)
++            else:
++                v.copy_(src[at:at + k], non_blocking=stream is not None)
++            at += k
++
++    def stop_load(self, lj: LoadJob, why: str) -> None:
++        """The engine: ``lj``'s extent is shrinking past rows it still has to fill: no more of its blocks are copied,
++        and it fails (every rank prefills). Its reads end first, their slots back to the reader."""
++
++        if lj.error is None:
++            lj.error = OSError(f"{lj.point.key if lj.point is not None else '?'}: {why}")
++        lj.stop = True
++        lj.done.wait()
++        self._settle(lj)
++
++    def _settle(self, lj: LoadJob) -> None:
++        """The engine, after the reader is through with ``lj``: blocks it read but nobody copied give their slots back
++        (their reads ended first)."""
++
++        with lj.cond:
++            left, lj.queued = list(lj.queued.values()), {}
++        concurrent.futures.wait([it[2] for it in left])
++        for it in left:
++            self.free_reads.put(it[0])
 +
 +    def _read_file(self, path: str, size: int):
 +        """A whole file: O_DIRECT into an aligned buffer where it works, else buffered; its pages dropped after. (The
@@ -1479,15 +1564,21 @@ index 0000000..5b5347a
 +        return buf[:size], min(got, size)
 +
 +    def finish_load(self, lj: LoadJob):
-+        """After ``lj`` is done on this rank: the small state's object (its tensors on the host) and the point. The
-+        caller's stream waits for the copies. Raises the read's error. Counts the restore."""
++        """The engine, when every rank is to end ``lj``: its blocks not copied yet into its extent (waiting for their
++        reads: an idle server copies them all here), then the small state's object (its tensors on the host) and the
++        point. The copies are on the current stream. Raises the read's error. Counts the restore."""
 +
++        if lj.error is None:
++            self.step(lj, upto=lj.total)
++        if lj.error is not None:
++            lj.stop = True
 +        lj.done.wait()
++        self._settle(lj)
++        if lj.error is None and (lj.next < lj.total or lj.small is None):
++            lj.error = OSError(f"{lj.point.key}: {lj.next} of {lj.total} blocks copied")
 +        if lj.error is not None:
 +            self.stats["load_failed"] += 1
 +            raise lj.error
-+        if lj.event is not None and torch.cuda.is_available():
-+            torch.cuda.current_stream().wait_event(lj.event)
 +        dt = time.perf_counter() - lj.t0
 +        self.stats["loaded"] += 1
 +        self.stats["loaded_tokens"] += lj.point.n
@@ -1598,8 +1689,23 @@ index 0000000..5b5347a
 +                "loaded_gib": round(s["loaded_bytes"] / (1 << 30), 2),
 +                "restore_ms_p50": p(0.5), "restore_ms_p95": p(0.95),
 +                **{f"unwritten_{k}": v for k, v in sorted(self.unwritten_by.items())}}
+diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5_next/cuda/engine.py
+index 4fab28d..1f131ca 100644
+--- tensorfold/families/glm5_next/cuda/engine.py
++++ tensorfold/families/glm5_next/cuda/engine.py
+@@ -741,6 +741,10 @@ class GlmEngine:
+             text = read_config(model_dir)
+             g = geometry(text)
+             per_token = max(1, -(-(g.bytes_at(capacity + 65536) - g.bytes_at(capacity)) // 65536))
++            if self.spill_cfg is not None:       # the spill tier's read-ahead, pinned now: the pool gets what it leaves
++                from tensorfold.cuda.spill_blocks import pin_read_ahead
++
++                self.cache_bytes = max(0, self.cache_bytes - pin_read_ahead(per_token * ALIGN))
+             # TF_GLM_DISPLAY_KV_MIB: the display reservation's bytes too, which free memory never counted
+             display = display_kv.credit()
+             # one kept state's fixed cost outside the pool, the largest of any rank's: every rank derives the same count
 diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
-index 06f33e7..9193539 100644
+index 06f33e7..b886c1d 100644
 --- tensorfold/families/glm5_next/cuda/multi.py
 +++ tensorfold/families/glm5_next/cuda/multi.py
 @@ -34,6 +34,7 @@ Multi-stream mode drafts with DFlash2 only: MTP policies are remapped to DFlash2
@@ -1610,22 +1716,24 @@ index 06f33e7..9193539 100644
  import hashlib
  import json
  import os
-@@ -55,11 +56,11 @@ from .multi_tune import MultiSettings, RoundProfile, allocate, reach_of, sample_
+@@ -55,11 +56,13 @@ from .multi_tune import MultiSettings, RoundProfile, allocate, reach_of, sample_
  from .pool import ALIGN, Pool, align_up
  from .verify import BatchedVerify, Segment, SerialVerify, Verified
  
 -ADMIT, EVICT, MOVE, GROW, FILL, ROUND, FINISH, IDLE, SLOT, MFILL, FILLPART, MFILLPART, LOAD, FLUSH, SPILL, LOADED, \
 -    TOUCH = range(1, 18)
 +ADMIT, EVICT, MOVE, GROW, FILL, ROUND, FINISH, IDLE, SLOT, MFILL, FILLPART, MFILLPART, LOAD, FLUSH, LOADED, \
-+    HAS = range(1, 17)
++    HAS, LOADPART = range(1, 18)
  OPS = {ADMIT: "ADMIT", EVICT: "EVICT", MOVE: "MOVE", GROW: "GROW", FILL: "FILL", ROUND: "ROUND", FINISH: "FINISH",
         IDLE: "IDLE", SLOT: "SLOT", MFILL: "MFILL", FILLPART: "FILLPART", MFILLPART: "MFILLPART", LOAD: "LOAD",
 -       FLUSH: "FLUSH", SPILL: "SPILL", LOADED: "LOADED", TOUCH: "TOUCH"}
-+       FLUSH: "FLUSH", LOADED: "LOADED", HAS: "HAS"}
++       FLUSH: "FLUSH", LOADED: "LOADED", HAS: "HAS", LOADPART: "LOADPART"}
++# TF_GLM_SPILL_LOAD_MS (default 40): the most a step of the reads in flight copies between two rounds (rank 0's time)
++LOAD_MS_DEFAULT = 40.0
  
  
  def watchdog_seconds(value: str | None = None) -> float:
-@@ -456,6 +457,7 @@ class Lane:
+@@ -456,6 +459,7 @@ class Lane:
      key: list[int] | None = None       # rank 0: the prompt's ids with its pictures' keys in their rows (kept states)
      images: bool = False               # both ranks: the prompt has pictures (its kept states are told apart by key)
      chat: int = 0                      # the conversation this stream belongs to (its kept states are capped together)
@@ -1633,7 +1741,7 @@ index 06f33e7..9193539 100644
      decoding: bool = False
      paused: bool = False
      t0: float = 0.0
-@@ -465,6 +467,9 @@ class Lane:
+@@ -465,6 +469,9 @@ class Lane:
      next_copy: Any = None        # ((copies length, room), proposal, proposed) the round's end worked out
  
  
@@ -1643,7 +1751,7 @@ index 06f33e7..9193539 100644
  class NoRoom(RuntimeError):
      """The pool cannot place a stream now (it waits for others to finish)."""
  
-@@ -559,6 +564,9 @@ class MultiDecoder:
+@@ -559,6 +566,9 @@ class MultiDecoder:
          self.sent = self.received = 0                     # messages sealed on rank 0, unsealed on rank 1
          self.lanes: dict[int, Lane] = {}                 # by sid, in admission order
          self.kept: list = []                             # kept prompts (decode.Snapshot + kid, extent), oldest first
@@ -1653,7 +1761,7 @@ index 06f33e7..9193539 100644
          self.disk = self._spill_store()                  # --spill-gib: the disk tier for kept prompts (cuda/spill.py)
          self.next_sid = self.next_kid = self.next_order = 0
          self.next_chat = 0
-@@ -608,6 +616,7 @@ class MultiDecoder:
+@@ -608,6 +618,7 @@ class MultiDecoder:
                  },
                  **({"multi_prefill": dict(self.grouped)} if self.group else {}),
                  **({"spill": self.disk.info()} if self.disk is not None else {}),
@@ -1661,7 +1769,7 @@ index 06f33e7..9193539 100644
                  # how long rank 0's current iteration has run (0 between iterations): a stalled server keeps growing it
                  "iteration_s": round(time.monotonic() - since, 1)
                  if (since := getattr(self, "iteration_since", None)) is not None else 0.0}
-@@ -985,6 +994,12 @@ class MultiDecoder:
+@@ -985,6 +996,12 @@ class MultiDecoder:
              chat = self.next_chat
          lane = Lane(s, a["sid"], a["slot"], x, st, self.next_order, code, spec, policy, dflash, feed=feed,
                      constraint=constraint, images=a["images"], chat=chat)
@@ -1674,7 +1782,7 @@ index 06f33e7..9193539 100644
          if a.get("keyed") is not None:              # rank 1 too: its kept states are stored and matched by them
              lane.key = a["keyed"]
          self.next_sid = max(self.next_sid, a["sid"] + 1)
-@@ -1077,14 +1092,17 @@ class MultiDecoder:
+@@ -1077,14 +1094,17 @@ class MultiDecoder:
          # the same ids: the same prompt, unless pictures are in it (rank 1 has no keys; rank 0 resumes by key)
          for c in [c for c in self.kept if c.ids == snap.ids and not (c.images or snap.images)]:
              self._drop(c, spill=False)
@@ -1694,7 +1802,7 @@ index 06f33e7..9193539 100644
              mine = [c for c in self.kept if getattr(c, "own", False) and getattr(c, "chat", 0) == snap.chat]
              for c in mine[:-KEEP_PER_CHAT]:
                  self._drop(c, spill=False)
-@@ -1094,7 +1112,7 @@ class MultiDecoder:
+@@ -1094,7 +1114,7 @@ class MultiDecoder:
          # the pool (copies of the DFlash2 window), so 64 entries reached tens of GiB on the hosts (free memory to
          # 0.1 GB) and never came back. With TF_GLM_KEPT_BYTES_GIB set, rank 0 drops states past it, by the cap's
          # victim order, and tells rank 1 with EVICT (the same rank-0-decides path the takeover uses); the freed blocks
@@ -1703,7 +1811,7 @@ index 06f33e7..9193539 100644
          if self.rank == 0 and self.kept_bytes_cap:
              while len(self.kept) > 1 and self._held_bytes() > self.kept_bytes_cap:
                  victim = cap_victim(self.kept)
-@@ -1127,11 +1145,9 @@ class MultiDecoder:
+@@ -1127,11 +1147,9 @@ class MultiDecoder:
          return sum(snapshot_bytes(c) for c in self.kept)
  
      def _drop(self, c, spill: bool = True) -> None:
@@ -1717,7 +1825,7 @@ index 06f33e7..9193539 100644
          held = 0
          if self.kept_bytes_cap:
              from .decode import snapshot_bytes
-@@ -1163,23 +1179,66 @@ class MultiDecoder:
+@@ -1163,23 +1181,66 @@ class MultiDecoder:
          self._emit(EVICT, [c.kid, int(spill)])
          self._drop(c, spill=spill)
  
@@ -1794,7 +1902,7 @@ index 06f33e7..9193539 100644
          planes = [(tuple(p.tensor.shape[1:]), str(p.tensor.dtype), p.div, p.pad) for p in self.arena.planes]
          drafter = getattr(self.g, "drafter", None)
          model = os.path.basename(str(getattr(self.g, "model_dir", "")).rstrip("/"))
-@@ -1190,14 +1249,16 @@ class MultiDecoder:
+@@ -1190,14 +1251,17 @@ class MultiDecoder:
                                os.environ.get("TF_GLM_KV", ""), os.environ.get("TF_GLM_DENSE", ""),
                                f"tp{self.w.world}", repr(planes), str(self.grid), str(self.drafts is not None),
                                repr(self.g.agreed)])
@@ -1806,6 +1914,7 @@ index 06f33e7..9193539 100644
 -                           classes=["tensorfold.families.glm5_next.cuda.decode:Snapshot"],
 -                           model_id=model, share=self.g._share, gather=self.g._gather_ints,
 -                           spanned=[f"p{i}" for i, p in enumerate(self.arena.planes) if p.spanned])
++        self.load_budget = float(os.environ.get("TF_GLM_SPILL_LOAD_MS") or LOAD_MS_DEFAULT) / 1000.0
 +        quota = float(os.environ.get("TF_GLM_SPILL_QUOTA", "0") or 0)
 +        turns = int(os.environ.get("TF_GLM_SPILL_TURNS") or 4)       # (0: every turn kept until room is needed)
 +        store = BlockStore(cfg, planes=self.arena.planes, block=ALIGN, rank=self.rank, world=self.w.world,
@@ -1817,7 +1926,7 @@ index 06f33e7..9193539 100644
          self._guard_pool()
          return store
  
-@@ -1216,7 +1277,7 @@ class MultiDecoder:
+@@ -1216,7 +1280,7 @@ class MultiDecoder:
              return remove(x)
  
          def g_move(x, base, size=None):
@@ -1826,7 +1935,7 @@ index 06f33e7..9193539 100644
              return move(x, base, size)
  
          def g_resize(x, size):
-@@ -1225,75 +1286,40 @@ class MultiDecoder:
+@@ -1225,75 +1289,40 @@ class MultiDecoder:
  
          pool.remove, pool.move, pool.resize = g_remove, g_move, g_resize
  
@@ -1836,21 +1945,23 @@ index 06f33e7..9193539 100644
 -        waits for its own)."""
 +    def _release_rows(self, x, keep: int | None) -> None:
 +        """Both ranks, each on its own: extent x's rows past ``keep`` are about to go or be overwritten (None: the
-+        extent moves, its rows with it): a read filling them ends first; waiting writes there get their rows copied to
-+        the host. A move waits for neither: a write reads the extent where it is when its blocks are staged, and a read
-+        copies each block where the extent is then (``_move`` holds it over the move)."""
++        extent moves, its rows with it): a read still to fill them stops (it fails: every rank prefills); waiting writes
++        there get their rows copied to the host. A move waits for neither: a write reads the extent where it is when its
++        blocks are staged, and a read copies each block where the extent is then (between rounds, on this stream)."""
  
-+        if keep is None:
-+            return
-         h = getattr(x, "loading", None)
-         if h is not None and h.lj is not None:
-             h.lj.done.wait()
+-        h = getattr(x, "loading", None)
+-        if h is not None and h.lj is not None:
+-            h.lj.done.wait()
 -        if self.disk is None or not self.spill_jobs:
--            return
++        if keep is None:
+             return
 -        self.spill_jobs = [j for j in self.spill_jobs if not j[0].copied.is_set()]
 -        for job, y, upto in self.spill_jobs:
 -            if y is x and upto > keep:
 -                self.disk.release(job)
++        h = getattr(x, "loading", None)
++        if h is not None and h.lj is not None and keep < h.n:
++            self.disk.stop_load(h.lj, "its extent shrank under the read")
 +        if self.disk is not None:
 +            self.disk.release(x, keep)
  
@@ -1915,21 +2026,21 @@ index 06f33e7..9193539 100644
              return "short"
          if self.grid and n % self.grid:
              return "off_grid"
-@@ -1303,93 +1329,31 @@ class MultiDecoder:
+@@ -1303,97 +1332,37 @@ class MultiDecoder:
              return "no_draft_window"
          return None
  
 -    def _spillable(self, c) -> bool:
 -        return self._unspillable(c) is None
--
--    def _unwritten(self, why: str) -> None:
--        st = self.disk.stats
--        st.unwritten_evicted += 1
--        st.unwritten[why] = st.unwritten.get(why, 0) + 1
 +    def _persist(self, c) -> None:
 +        """Both ranks, as ``c`` is kept: its state to this rank's disk (``BlockStore.persist``; a failure only leaves it
 +        off disk)."""
  
+-    def _unwritten(self, why: str) -> None:
+-        st = self.disk.stats
+-        st.unwritten_evicted += 1
+-        st.unwritten[why] = st.unwritten.get(why, 0) + 1
+-
 -    def _spill(self, c, leaving: bool = False, keep: frozenset = frozenset()) -> bool:
 -        """Both ranks, in lockstep: write kept prompt ``c`` (its rows still in place) to the spill tier, unless it is
 -        there or on its way, superseded, off grid, too short, or lacks the DFlash2 window a stream resuming from it
@@ -1968,18 +2079,18 @@ index 06f33e7..9193539 100644
 -    def _kept_keys(self) -> frozenset:
 -        """Both ranks alike: the stored copies an early write never evicts, those of the prompts still kept (else
 -        they evict each other in turn under a small cap)."""
-+            self.disk.unwritten("failed")
- 
+-
 -        return frozenset(self._key(k) for k in self.kept if self._spillable(k))
-+    def _pump(self) -> None:
-+        """Both ranks, between iterations: waiting writes' next blocks through the ring (never the engine's failure:
-+        rank 1 raising here would leave rank 0 waiting in its next collective)."""
++            self.disk.unwritten("failed")
  
 -    def _behind(self) -> None:
 -        """Rank 0: past the pool's high-water mark (``--spill-highwater``), or near the kept-prompt cap, the kept
 -        prompts eviction would take next are written in the background (SPILL), so an eviction usually finds them on
 -        disk and frees their rows at once. A writer's worth at a time; more wait for the next iteration (deferred)."""
--
++    def _pump(self) -> None:
++        """Both ranks, between iterations: waiting writes' next blocks through the ring (never the engine's failure:
++        rank 1 raising here would leave rank 0 waiting in its next collective)."""
+ 
 -        d = self.disk
 -        rows = self.pool.rows
 -        used = rows - self.pool.free_rows()
@@ -2028,7 +2139,13 @@ index 06f33e7..9193539 100644
  
      # reads: rank 0 sends LOAD when a request's prompt extends a stored prompt longer than any kept one; both ranks
      # add an extent for it and start their reads (other streams keep decoding meanwhile); when rank 0's read is done
-@@ -1416,22 +1380,29 @@ class MultiDecoder:
+     # it sends LOADED and both agree, in one all-gather, that every read worked: the extent then holds a kept prompt
++    # (the reads only read: between rounds rank 0 copies its blocks read so far and sends LOADPART, and rank 1 copies
++    # as far; LOADED copies the rest on each rank)
+     # the request resumes from; else it goes, the entry is forgotten, and the request prefills.
+     def prestage(self, s: Stream):
+         """Rank 0, before a request is admitted: a read of the stored prompt its prompt extends, or None (nothing to
+@@ -1416,22 +1385,29 @@ class MultiDecoder:
              if len(prompt) >= h.n and prompt[:h.n] == h.ids:
                  return h
          hit = self._resume(prompt)
@@ -2037,7 +2154,10 @@ index 06f33e7..9193539 100644
 +        self.disk.stats["disk_lookups"] += 1
 +        pt = self.disk.best(prompt, len(hit.ids) if hit is not None else 0, self.grid)
 +        if pt is None:
-+            return None
+             return None
+-        size = align_up(e.n)
+-        self._emit(TOUCH, list(e.key))           # both ranks: the newest entry now, so no save made for room evicts it
+-        self.disk.touch_key(e.key)
 +        from tensorfold.cuda.spill_blocks import key_ints
 +
 +        hi, lo, n = key_ints(pt.key)
@@ -2045,10 +2165,7 @@ index 06f33e7..9193539 100644
 +        self._flush()
 +        if not all(r[0] for r in self.g._gather_ints([int(self.disk.has(pt.key))])):
 +            self.disk.stats["has_refused"] += 1          # a rank lacks it (lost, damaged, evicted there)
-             return None
--        size = align_up(e.n)
--        self._emit(TOUCH, list(e.key))           # both ranks: the newest entry now, so no save made for room evicts it
--        self.disk.touch_key(e.key)
++            return None
 +        size = align_up(pt.n)
          base = self._room(size, [hit.extent] if hit is not None else [])
          if base is None:
@@ -2067,7 +2184,7 @@ index 06f33e7..9193539 100644
          return h
  
      def _start_load(self, hi: int, lo: int, n: int, base: int, size: int, lid: int):
-@@ -1444,15 +1415,11 @@ class MultiDecoder:
+@@ -1444,49 +1420,76 @@ class MultiDecoder:
          h = types.SimpleNamespace(lid=lid, key=(hi, lo), n=n, x=x, lj=None, err=None, done=False, ids=None)
          x.loading = h
  
@@ -2086,7 +2203,38 @@ index 06f33e7..9193539 100644
          except Exception as exc:                 # noqa: BLE001  (the read fails at LOADED, on every rank)
              h.err = exc
          self.loads[lid] = h
-@@ -1464,29 +1431,33 @@ class MultiDecoder:
+         return h
+ 
++    def step_loads(self) -> None:
++        """Rank 0, between iterations: each read's blocks read so far into its extent (on this thread, never beside a
++        decoding stream), at most TF_GLM_SPILL_LOAD_MS; LOADPART has rank 1 copy as far (waiting for its own reads)."""
++
++        if self.disk is None or not self.loads:
++            return
++        budget = getattr(self, "load_budget", LOAD_MS_DEFAULT / 1000.0)
++        for h in list(self.loads.values()):
++            if h.done or h.err is not None or h.lj is None or h.lj.error is not None:
++                continue
++            if self.disk.step(h.lj, budget=budget):
++                self._emit(LOADPART, [h.lid, h.lj.next])
++        if self.outbox and self.idle:            # rank 1 waits for the bell between requests (``finish`` rings IDLE)
++            self._flush()
++
++    def _load_part(self, lid: int, upto: int) -> None:
++        """Rank 1 (LOADPART): read ``lid``'s blocks before ``upto`` into its extent, waiting for its own reads. A
++        failure only fails the read (LOADED says so on every rank)."""
++
++        h = self.loads.get(lid)
++        if h is None or h.err is not None or h.lj is None or h.lj.error is not None:
++            return
++        try:
++            self.disk.step(h.lj, upto=upto)
++        except Exception as exc:                 # noqa: BLE001
++            h.lj.error = exc
++
+     def load_ready(self, h) -> bool:
+         """Rank 0: this rank's read is over (or never started)."""
+ 
          return h.done or h.err is not None or (h.lj is not None and h.lj.done.is_set())
  
      def complete_load(self, h) -> bool:
@@ -2128,7 +2276,7 @@ index 06f33e7..9193539 100644
              except Exception as exc:             # noqa: BLE001  (a failed read: every rank prefills)
                  print(f"[tensorfold] spill rank {self.rank}: restore failed: {exc!r}", flush=True)
          else:
-@@ -1497,19 +1468,28 @@ class MultiDecoder:
+@@ -1497,19 +1500,28 @@ class MultiDecoder:
          h.done = True
          h.ok = all(r[0] for r in every)
          if not h.ok:
@@ -2162,7 +2310,7 @@ index 06f33e7..9193539 100644
          snap.own, snap.chat = False, 0           # a restored state counts against no conversation's quota
          snap.extent = x
          x.kept.append(snap)
-@@ -1519,50 +1499,32 @@ class MultiDecoder:
+@@ -1519,50 +1531,32 @@ class MultiDecoder:
          return True
  
      def flush_spill(self, budget: float | None = None) -> None:
@@ -2222,7 +2370,7 @@ index 06f33e7..9193539 100644
          if getattr(x, "loading", None) is not None:      # a stored prompt being read into it (``_start_load``)
              used = max(used, x.loading.n)
          if x.owner is not None:
-@@ -1572,11 +1534,14 @@ class MultiDecoder:
+@@ -1572,11 +1566,14 @@ class MultiDecoder:
          return used
  
      def _move(self, x, base: int, size: int) -> None:
@@ -2240,7 +2388,7 @@ index 06f33e7..9193539 100644
          if x.owner is not None:
              self.lanes[x.owner].st.bind(x.base, x.size)
  
-@@ -1666,10 +1631,7 @@ class MultiDecoder:
+@@ -1666,10 +1663,7 @@ class MultiDecoder:
          _watch(self.watchdog, "iteration")               # cancelled at the end of ``finish``
          self.iteration_since = time.monotonic()           # /health's iteration_s
          try:
@@ -2252,7 +2400,7 @@ index 06f33e7..9193539 100644
              return self._iterate()
          except Exception as exc:
              self.broken = exc
-@@ -2244,6 +2206,8 @@ class MultiDecoder:
+@@ -2244,6 +2238,8 @@ class MultiDecoder:
              self._emit(IDLE, [])
              self._flush()
              self.idle = True
@@ -2261,7 +2409,7 @@ index 06f33e7..9193539 100644
          _unwatch(self.watchdog)
          self.iteration_since = None
  
-@@ -2324,6 +2288,7 @@ class MultiDecoder:
+@@ -2324,6 +2320,7 @@ class MultiDecoder:
              _watch(self.watchdog, f"rank {self.rank} message")   # busy: rank 0's next message is due within a round
              self.apply(unseal(self.g._share(None), self.received, self.rank))
              self.received = (self.received + 1) % SEAL_MOD
@@ -2269,12 +2417,14 @@ index 06f33e7..9193539 100644
              _unwatch(self.watchdog)
              if once:
                  return
-@@ -2357,12 +2322,12 @@ class MultiDecoder:
+@@ -2357,12 +2354,14 @@ class MultiDecoder:
                  self._start_load(*p)
              elif op == LOADED:
                  self._finish_load(*p)
 -            elif op == TOUCH:
 -                self.disk.touch_key((p[0], p[1]))
++            elif op == LOADPART:
++                self._load_part(*p)
 +            elif op == HAS:
 +                from tensorfold.cuda.spill_blocks import ints_key
 +
@@ -2286,7 +2436,7 @@ index 06f33e7..9193539 100644
              elif op == MOVE:
                  self._move(self.pool.get(p[0]), p[1], p[2])
              elif op == GROW:
-@@ -2405,6 +2370,8 @@ class MultiDecoder:
+@@ -2405,6 +2404,8 @@ class MultiDecoder:
                  if self.lanes:
                      raise RuntimeError(f"rank 1 holds {len(self.lanes)} streams rank 0 has finished")
                  self.idle = True
@@ -2295,7 +2445,7 @@ index 06f33e7..9193539 100644
              else:
                  raise RuntimeError(f"rank 1: unknown op {op}")
  
-@@ -2431,6 +2398,7 @@ class GlmScheduler(Scheduler):
+@@ -2431,6 +2432,7 @@ class GlmScheduler(Scheduler):
          self.flush_lock = threading.Lock()
          self.loading: list = []          # (read, item): requests waiting for a stored prompt read (--spill-gib)
          self.ready: list = []            # items whose read ended: admitted before the queue
@@ -2303,7 +2453,7 @@ index 06f33e7..9193539 100644
          self.staged: set = set()         # streams a read was looked for already
          # TF_GLM_MULTI_PREFILL_WAIT_MS: an idle server's wait for requests arriving with the first (their prompts then
          # share its first chunk); only with TF_GLM_MULTI_PREFILL=1
-@@ -2512,7 +2480,7 @@ class GlmScheduler(Scheduler):
+@@ -2512,7 +2514,7 @@ class GlmScheduler(Scheduler):
  
          if background or self.max_in_system is None:
              return
@@ -2312,7 +2462,7 @@ index 06f33e7..9193539 100644
          if held + self.waiting.foreground_count() >= self.max_in_system:
              raise CapacityError("all serving lanes are busy; retry shortly")
  
-@@ -2526,6 +2494,7 @@ class GlmScheduler(Scheduler):
+@@ -2526,6 +2528,7 @@ class GlmScheduler(Scheduler):
          import heapq
  
          self.ready = [it for it in self.ready if not self._cancel_item(it)]   # their stored prompts read (--spill-gib)
@@ -2320,17 +2470,19 @@ index 06f33e7..9193539 100644
          self.loading = [(read, None if it is None or self._cancel_item(it) else it) for read, it in self.loading]
          if self.held is not None and self._cancel_item(self.held):
              self.held = None
-@@ -2556,6 +2525,9 @@ class GlmScheduler(Scheduler):
+@@ -2556,6 +2559,11 @@ class GlmScheduler(Scheduler):
                  self.decoder.flush_spill()
              finally:
                  flush.set()
 +        for w, it in [p for p in self.prefix if self.decoder.prefix_ready(p[0])]:
 +            self.prefix.remove((w, it))
 +            self.ready.append(it)                    # (admitted before the queue, resuming from that point)
++        if self.loading:
++            self.decoder.step_loads()                # reads' blocks into the pool, between rounds (this thread)
          for it in [it for it in self.loading if self.decoder.load_ready(it[0])]:
              self.loading.remove(it)
              try:
-@@ -2601,6 +2573,13 @@ class GlmScheduler(Scheduler):
+@@ -2601,6 +2609,13 @@ class GlmScheduler(Scheduler):
                      self.loading.append((read, item))
                      continue
              self.staged.discard(id(stream))
@@ -2344,7 +2496,7 @@ index 06f33e7..9193539 100644
              self.boxes[id(stream)] = box
              try:
                  self.decoder.admit(stream)
-@@ -2669,7 +2648,7 @@ class GlmScheduler(Scheduler):
+@@ -2669,7 +2684,7 @@ class GlmScheduler(Scheduler):
      def _iteration(self) -> None:
          self._cancel_waiting()
          self._yield()

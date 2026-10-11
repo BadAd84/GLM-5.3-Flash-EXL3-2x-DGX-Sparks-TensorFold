@@ -8,8 +8,8 @@
 # Each run applies one mutant (one or more edits, python escapes; an anchor that does not match exactly once is an
 # ERROR, never a pass); a kill needs the check's non-zero exit AND a FAIL line. names: a bash regex, only the runs it
 # matches. Exit 0 only when the unmutated check passes and every mutant is killed. Not mutated (no CPU check reaches
-# them): the CUDA events that order a read's copies around a move (``moving``'s wait on ``last``, the reader's wait on
-# ``moved``).
+# them): the CUDA events that keep a read's pinned slot from being read into again before the engine's copy out of it
+# ended (``_recycle``).
 set -u
 TARGET=$1; ONLY=${2:-.}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -60,12 +60,16 @@ run tail-staged-later $B "        cut = [(h, _host(torch.cat(self._parts(extent,
 run tail-copied-and-staged $B "            job = Job(pt, new[:len(new) - len(cut)], (items, layer)" "            job = Job(pt, new, (items, layer)"
 run tail-not-queued $B "        for h, data in cut:                                 # (written before the blocks the pumps stage)\n            self.jobs.put((\"rows\", job, h, data))\n" ""
 # review 2: a move of an extent being read waits for neither the read nor the disk
-run move-waits-for-read $MU "        if keep is None:\n            return\n        h = getattr(x, \"loading\", None)\n        if h is not None and h.lj is not None:\n            h.lj.done.wait()\n        if self.disk is not None:\n" "        h = getattr(x, \"loading\", None)\n        if h is not None and h.lj is not None:\n            h.lj.done.wait()\n        if self.disk is not None and keep is not None:\n"
+run move-waits-for-read $MU "        if keep is None:\n            return\n        h = getattr(x, \"loading\", None)\n        if h is not None and h.lj is not None and keep < h.n:\n            self.disk.stop_load(h.lj, \"its extent shrank under the read\")\n" "        h = getattr(x, \"loading\", None)\n        while h is not None and h.lj is not None and not all(it[2].done() for it in list(h.lj.queued.values())):\n            time.sleep(0.01)\n        if keep is None:\n            return\n"
 run read-at-first-base $B "        self.point, self.where = point, where\n" "        self.point, self.where = point, where\n        self.base0 = where.base\n" \
-    $B "                base = lj.where.base\n" "                base = lj.base0\n"
-run move-not-held $MU "        with self.disk.moving(h.lj) if h is not None and h.lj is not None else contextlib.nullcontext():" "        with contextlib.nullcontext():"
-run moving-without-lock $B "        with lj.lock:\n            if lj.last is not None:" "        with contextlib.nullcontext():\n            if lj.last is not None:"
-run copies-without-lock $B "            with lj.lock:                                   # (the extent stays" "            with contextlib.nullcontext():                                   # (the extent stays"
+    $B "        base = lj.where.base\n" "        base = lj.base0\n"
+# the reader reads, the engine copies between rounds; LOADPART takes rank 1 as far
+run reader-copies $B "            fut = self._readers.submit(self._read_block, h, pt.crcs[i], self.read_slots[b], nb)\n" "            fut = self._readers.submit(self._read_block, h, pt.crcs[i], self.read_slots[b], nb)\n            fut.result()\n            self._copy_in(lj, self.read_slots[b], s, e)\n            self.stats[\"loaded_bytes\"] += nb\n"
+run no-step $MU "            if self.disk.step(h.lj, budget=budget):\n" "            if False:\n"
+run loadpart-not-sent $MU "                self._emit(LOADPART, [h.lid, h.lj.next])\n" "                pass\n"
+run loadpart-not-applied $MU "            elif op == LOADPART:\n                self._load_part(*p)" "            elif op == LOADPART:\n                pass"
+run loadpart-past-upto $B "        end = lj.total if upto is None else min(int(upto), lj.total)\n" "        end = lj.total\n"
+run loaded-without-rest $B "        if lj.error is None:\n            self.step(lj, upto=lj.total)\n" ""
 # review 3, shared flag 1 and 2: a restore keeps rank 0's shared-prefix flag on every rank
 run restore-unshared $MU "        snap.shared = bool(shared)" "        snap.shared = False" \
     $MU "        self._emit(LOADED, [h.lid, shared])" "        self._emit(LOADED, [h.lid])"
@@ -86,8 +90,8 @@ run lost-names-kept $B "            gone = bad | set(lost)\n" "            gone 
 run damage-not-widened $B "                if b in self.have and self.have[b][1] in self.inodes:\n                    bad |= self.inodes[self.have[b][1]][1]\n" "                pass\n"
 run finish-load-drops-lost $MU "            self.disk.forget(h.key, lj.bad if lj is not None else (), lj.lost if lj is not None else ())" "            self.disk.forget(h.key, lj.bad if lj is not None else ())"
 # review 5: no op without a sender; the prefix wait's counters in /metrics
-run ops-unsent $MU "LOAD, FLUSH, LOADED, \\\\\n    HAS = range(1, 17)" "LOAD, FLUSH, SPILL, LOADED, \\\\\n    TOUCH, HAS = range(1, 19)" \
-    $MU "       FLUSH: \"FLUSH\", LOADED: \"LOADED\", HAS: \"HAS\"}" "       FLUSH: \"FLUSH\", SPILL: \"SPILL\", LOADED: \"LOADED\", TOUCH: \"TOUCH\", HAS: \"HAS\"}"
+run ops-unsent $MU "LOAD, FLUSH, LOADED, \\\\\n    HAS, LOADPART = range(1, 18)" "LOAD, FLUSH, SPILL, LOADED, \\\\\n    TOUCH, HAS, LOADPART = range(1, 20)" \
+    $MU "       FLUSH: \"FLUSH\", LOADED: \"LOADED\", HAS: \"HAS\", LOADPART: \"LOADPART\"}" "       FLUSH: \"FLUSH\", SPILL: \"SPILL\", LOADED: \"LOADED\", TOUCH: \"TOUCH\", HAS: \"HAS\", LOADPART: \"LOADPART\"}"
 run prefix-not-exported server/metrics.py "        if field in body:\n            body.setdefault(name, body[field])\n" "        pass\n"
 # the page cache: every point file's pages dropped after its fsync (already so in the patch; pinned here)
 run small-files-keep-pages $B "            os.fsync(fd)\n            _drop_cache(fd)                                 # (clean now" "            os.fsync(fd)\n            pass                                 # (clean now"

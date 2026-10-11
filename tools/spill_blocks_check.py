@@ -10,9 +10,10 @@ A real BlockStore over a real Arena on the host (a latents plane, div 1, and a p
 rows), with a stand-in small state, and MultiDecoder's own load and move paths on a real Pool:
 - the block a kept state's end cuts holds the rows of the keep, not what the stream writes after it (its pooled-key
   row still filling at the keep);
-- compaction moving an extent a stored prompt is being read into goes on without waiting for the disk, the read's next
-  blocks land at the new base and none at the old one, and a move that starts while a block's copy is being issued
-  waits for that copy and moves it too;
+- a read only reads: its reader copies no row (no CUDA work off the engine's thread); the engine copies the blocks
+  read so far between rounds (rank 0's step, LOADPART to rank 1 copying as far, the rest at LOADED), on its own thread;
+- compaction moving an extent a stored prompt is being read into goes on without waiting for the disk, and the read's
+  later blocks land at the new base and none at the old one;
 - a restored state keeps its point's shared-prefix flag, rank 0's on every rank (LOADED carries it);
 - the same ids kept again as a shared prefix make the stored point shared, its json rewritten through a temporary
   name and the folder fsynced (a restart reads it so), also when they were still waiting or being written; a point
@@ -204,7 +205,7 @@ below = m.pool.add(0, 2 * ALIGN)                    # an extent below the read's
 hi, lo, _ = S.key_ints(pt.key)
 h = m._start_load(hi, lo, n, 2 * ALIGN, align_up(n), 0)
 x = h.x
-check("move: the read's first block is in the pool", until(lambda: st.stats["loaded_bytes"] > 0))
+check("move: the read's first block is in the pool", until(lambda: (m.step_loads(), st.stats["loaded_bytes"] > 0)[1]))
 m.pool.remove(below)
 t = threading.Thread(target=m._compact, daemon=True)
 t.start()
@@ -222,46 +223,39 @@ check("move: its rows are at the extent's new base, as they were kept", same(row
 check("move: no block of the read landed at the old base", same(span(ar, *left), before))
 
 
-class Holding:
-    """Extent ``x``'s base as the reader reads it to issue a block's copies; the first read hands out the base, then
-    waits for ``go`` (a move starting now finds that block's copies being issued)."""
-
-    def __init__(self, x) -> None:
-        self.x, self.entered, self.go = x, threading.Event(), threading.Event()
-
-    @property
-    def base(self) -> int:
-        b = self.x.base
-        if not self.entered.is_set():
-            self.entered.set()
-            self.go.wait(TIMEOUT / 4)
-        return b
-
-
+# -- the reader reads, the engine copies (between rounds, on its thread; LOADPART takes rank 1 as far) ------------------
 ar = arena(3)
-st = store(ar, "lock")
+st = store(ar, "engine")
 m = decoder(ar, st)
 ids, kept = stored(st, ar, n, 31)
 pt = st.index[S.point_key(ids)]
-gate = gate_reads(st, lambda h: True)
-below = m.pool.add(0, 2 * ALIGN)
 hi, lo, _ = S.key_ints(pt.key)
 h = m._start_load(hi, lo, n, 2 * ALIGN, align_up(n), 0)
 x = h.x
-hold = Holding(x)
-h.lj.where = hold                                   # (the reader reads the extent's base through it)
-gate.set()
-check("lock: a block's copies are being issued", until(hold.entered.is_set))
-m.pool.remove(below)
-t = threading.Thread(target=m._compact, daemon=True)
-t.start()
-t.join(0.5)
-check("lock: the move waits for the copies being issued", t.is_alive())
-hold.go.set()
-t.join(TIMEOUT / 2)
-check("lock: the read ends", until(lambda: h.lj.done.is_set()))
-check("lock: the stored prompt is kept after its read", m.complete_load(h) and len(x.kept) == 1)
-check("lock: its rows are at the extent's new base, as they were kept", x.base == 0 and same(rows(ar, x.base, n), kept))
+for p in ar.planes:
+    p.tensor[x.base // p.div:(x.base + align_up(n)) // p.div] = 5
+before = rows(ar, x.base, n)
+check("engine: the reader reads every block and copies none", until(lambda: h.lj.done.is_set())
+      and len(h.lj.queued) == h.lj.total and st.stats["loaded_bytes"] == 0 and same(rows(ar, x.base, n), before))
+threads, copy_in = set(), st._copy_in
+st._copy_in = lambda *a: (threads.add(threading.get_ident()), copy_in(*a))[1]
+m.step_loads()
+check("engine: a step copies the blocks read, on the engine's own thread",
+      h.lj.next == h.lj.total and threads == {threading.get_ident()})
+check("engine: LOADPART tells rank 1 how far", [p for op, p in m.parse(m.outbox) if op == M.LOADPART] == [[0, h.lj.total]])
+check("engine: the stored prompt is kept after its read", m.complete_load(h) and len(x.kept) == 1)
+check("engine: its rows as they were kept", same(rows(ar, x.base, n), kept))
+ar = arena(4)
+st = store(ar, "engine1", 1)
+m1 = decoder(ar, st, 1)
+ids, kept = stored(st, ar, n, 31)
+hi, lo, _ = S.key_ints(S.point_key(ids))
+m1.apply([M.LOAD, 6, hi, lo, n, 2 * ALIGN, align_up(n), 0])
+h = m1.loads[0]
+m1.apply([M.LOADPART, 2, 0, 2])
+check("engine: rank 1 copies as far as LOADPART says (waiting for its reads), no further", h.lj.next == 2)
+m1.apply([M.LOADED, 2, 0, 0])
+check("engine: rank 1 copies the rest at LOADED, its rows as kept", len(m1.kept) == 1 and same(rows(ar, h.x.base, n), kept))
 
 
 # -- review 3, shared-flag 1 and 2: a restore keeps the shared-prefix flag, rank 0's on every rank -----------------
