@@ -11,10 +11,10 @@
 # for issue #122, reported by @xiepengqi; the rest by @wojo. Builds on 0088-glm-spill-tier. Apache-2.0.
 diff --git tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
 new file mode 100644
-index 0000000..027a0f4
+index 0000000..8c73db8
 --- /dev/null
 +++ tensorfold/cuda/spill_blocks.py
-@@ -0,0 +1,1683 @@
+@@ -0,0 +1,1699 @@
 +"""The spill tier's block store for a shared pool of cache rows (``tensorfold serve --spill-gib`` with several streams):
 +every kept prompt state is written to this rank's disk when it is kept, so it survives an eviction, a restart and a
 +crash, and a later request that extends the same tokens reads it back instead of prefilling them.
@@ -1454,6 +1454,22 @@ index 0000000..027a0f4
 +                keep.append((b, ev))
 +        self.read_events = keep
 +
++    def settle(self) -> None:
++        """The engine (every rank), in a decode round once its verify pass is queued: every read slot copied out by
++        the last step (on this stream, before the round's work) back to the reader, waiting for the newest of those
++        copies while the GPU runs the queued pass. Without it a step frees only the slots the step before copied out,
++        so beside a decoding stream a slot turns every second round."""
++
++        evs = getattr(self, "read_events", None)        # (made with the slots, at the first read or write)
++        if not evs:
++            return
++        last = next((ev for _, ev in reversed(evs) if ev is not None), None)
++        if last is not None:
++            last.synchronize()                          # (one stream: the copies before it are done too)
++        for b, _ in evs:
++            self.free_reads.put(b)
++        self.read_events = []
++
 +    def step(self, lj: LoadJob, upto: int | None = None, budget: float | None = None) -> int:
 +        """The engine, between rounds (either rank): ``lj``'s next blocks into its extent, at its base now, on the
 +        current stream, in order. Without ``upto``: only blocks read already, for at most ``budget`` seconds; with it:
@@ -1714,7 +1730,7 @@ index 4fab28d..1f131ca 100644
              display = display_kv.credit()
              # one kept state's fixed cost outside the pool, the largest of any rank's: every rank derives the same count
 diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_next/cuda/multi.py
-index 06f33e7..b886c1d 100644
+index 06f33e7..ecd4207 100644
 --- tensorfold/families/glm5_next/cuda/multi.py
 +++ tensorfold/families/glm5_next/cuda/multi.py
 @@ -34,6 +34,7 @@ Multi-stream mode drafts with DFlash2 only: MTP policies are remapped to DFlash2
@@ -2041,15 +2057,15 @@ index 06f33e7..b886c1d 100644
  
 -    def _spillable(self, c) -> bool:
 -        return self._unspillable(c) is None
-+    def _persist(self, c) -> None:
-+        """Both ranks, as ``c`` is kept: its state to this rank's disk (``BlockStore.persist``; a failure only leaves it
-+        off disk)."""
- 
+-
 -    def _unwritten(self, why: str) -> None:
 -        st = self.disk.stats
 -        st.unwritten_evicted += 1
 -        st.unwritten[why] = st.unwritten.get(why, 0) + 1
--
++    def _persist(self, c) -> None:
++        """Both ranks, as ``c`` is kept: its state to this rank's disk (``BlockStore.persist``; a failure only leaves it
++        off disk)."""
+ 
 -    def _spill(self, c, leaving: bool = False, keep: frozenset = frozenset()) -> bool:
 -        """Both ranks, in lockstep: write kept prompt ``c`` (its rows still in place) to the spill tier, unless it is
 -        there or on its way, superseded, off grid, too short, or lacks the DFlash2 window a stream resuming from it
@@ -2088,18 +2104,18 @@ index 06f33e7..b886c1d 100644
 -    def _kept_keys(self) -> frozenset:
 -        """Both ranks alike: the stored copies an early write never evicts, those of the prompts still kept (else
 -        they evict each other in turn under a small cap)."""
--
--        return frozenset(self._key(k) for k in self.kept if self._spillable(k))
 +            self.disk.unwritten("failed")
+ 
+-        return frozenset(self._key(k) for k in self.kept if self._spillable(k))
++    def _pump(self) -> None:
++        """Both ranks, between iterations: waiting writes' next blocks through the ring (never the engine's failure:
++        rank 1 raising here would leave rank 0 waiting in its next collective)."""
  
 -    def _behind(self) -> None:
 -        """Rank 0: past the pool's high-water mark (``--spill-highwater``), or near the kept-prompt cap, the kept
 -        prompts eviction would take next are written in the background (SPILL), so an eviction usually finds them on
 -        disk and frees their rows at once. A writer's worth at a time; more wait for the next iteration (deferred)."""
-+    def _pump(self) -> None:
-+        """Both ranks, between iterations: waiting writes' next blocks through the ring (never the engine's failure:
-+        rank 1 raising here would leave rank 0 waiting in its next collective)."""
- 
+-
 -        d = self.disk
 -        rows = self.pool.rows
 -        used = rows - self.pool.free_rows()
@@ -2163,10 +2179,7 @@ index 06f33e7..b886c1d 100644
 +        self.disk.stats["disk_lookups"] += 1
 +        pt = self.disk.best(prompt, len(hit.ids) if hit is not None else 0, self.grid)
 +        if pt is None:
-             return None
--        size = align_up(e.n)
--        self._emit(TOUCH, list(e.key))           # both ranks: the newest entry now, so no save made for room evicts it
--        self.disk.touch_key(e.key)
++            return None
 +        from tensorfold.cuda.spill_blocks import key_ints
 +
 +        hi, lo, n = key_ints(pt.key)
@@ -2174,7 +2187,10 @@ index 06f33e7..b886c1d 100644
 +        self._flush()
 +        if not all(r[0] for r in self.g._gather_ints([int(self.disk.has(pt.key))])):
 +            self.disk.stats["has_refused"] += 1          # a rank lacks it (lost, damaged, evicted there)
-+            return None
+             return None
+-        size = align_up(e.n)
+-        self._emit(TOUCH, list(e.key))           # both ranks: the newest entry now, so no save made for room evicts it
+-        self.disk.touch_key(e.key)
 +        size = align_up(pt.n)
          base = self._room(size, [hit.extent] if hit is not None else [])
          if base is None:
@@ -2409,7 +2425,19 @@ index 06f33e7..b886c1d 100644
              return self._iterate()
          except Exception as exc:
              self.broken = exc
-@@ -2244,6 +2238,8 @@ class MultiDecoder:
+@@ -2102,6 +2096,11 @@ class MultiDecoder:
+         if prof is not None:
+             prof.gpu_start()
+         v = forward_streams(verify, segments)
++        if self.disk is not None and self.loads:
++            try:
++                self.disk.settle()               # (reads' slots back beside the queued pass: a slot turns every round)
++            except Exception as exc:             # noqa: BLE001  (never the engine's failure: the read ends at LOADED)
++                print(f"[tensorfold] spill rank {self.rank}: read settle failed: {exc!r}", flush=True)
+         if prof is not None:
+             prof.gpu_stop()
+             prof.mark("verify")
+@@ -2244,6 +2243,8 @@ class MultiDecoder:
              self._emit(IDLE, [])
              self._flush()
              self.idle = True
@@ -2418,7 +2446,7 @@ index 06f33e7..b886c1d 100644
          _unwatch(self.watchdog)
          self.iteration_since = None
  
-@@ -2324,6 +2320,7 @@ class MultiDecoder:
+@@ -2324,6 +2325,7 @@ class MultiDecoder:
              _watch(self.watchdog, f"rank {self.rank} message")   # busy: rank 0's next message is due within a round
              self.apply(unseal(self.g._share(None), self.received, self.rank))
              self.received = (self.received + 1) % SEAL_MOD
@@ -2426,7 +2454,7 @@ index 06f33e7..b886c1d 100644
              _unwatch(self.watchdog)
              if once:
                  return
-@@ -2357,12 +2354,14 @@ class MultiDecoder:
+@@ -2357,12 +2359,14 @@ class MultiDecoder:
                  self._start_load(*p)
              elif op == LOADED:
                  self._finish_load(*p)
@@ -2445,7 +2473,7 @@ index 06f33e7..b886c1d 100644
              elif op == MOVE:
                  self._move(self.pool.get(p[0]), p[1], p[2])
              elif op == GROW:
-@@ -2405,6 +2404,8 @@ class MultiDecoder:
+@@ -2405,6 +2409,8 @@ class MultiDecoder:
                  if self.lanes:
                      raise RuntimeError(f"rank 1 holds {len(self.lanes)} streams rank 0 has finished")
                  self.idle = True
@@ -2454,7 +2482,7 @@ index 06f33e7..b886c1d 100644
              else:
                  raise RuntimeError(f"rank 1: unknown op {op}")
  
-@@ -2431,6 +2432,7 @@ class GlmScheduler(Scheduler):
+@@ -2431,6 +2437,7 @@ class GlmScheduler(Scheduler):
          self.flush_lock = threading.Lock()
          self.loading: list = []          # (read, item): requests waiting for a stored prompt read (--spill-gib)
          self.ready: list = []            # items whose read ended: admitted before the queue
@@ -2462,7 +2490,7 @@ index 06f33e7..b886c1d 100644
          self.staged: set = set()         # streams a read was looked for already
          # TF_GLM_MULTI_PREFILL_WAIT_MS: an idle server's wait for requests arriving with the first (their prompts then
          # share its first chunk); only with TF_GLM_MULTI_PREFILL=1
-@@ -2512,7 +2514,7 @@ class GlmScheduler(Scheduler):
+@@ -2512,7 +2519,7 @@ class GlmScheduler(Scheduler):
  
          if background or self.max_in_system is None:
              return
@@ -2471,7 +2499,7 @@ index 06f33e7..b886c1d 100644
          if held + self.waiting.foreground_count() >= self.max_in_system:
              raise CapacityError("all serving lanes are busy; retry shortly")
  
-@@ -2526,6 +2528,7 @@ class GlmScheduler(Scheduler):
+@@ -2526,6 +2533,7 @@ class GlmScheduler(Scheduler):
          import heapq
  
          self.ready = [it for it in self.ready if not self._cancel_item(it)]   # their stored prompts read (--spill-gib)
@@ -2479,7 +2507,7 @@ index 06f33e7..b886c1d 100644
          self.loading = [(read, None if it is None or self._cancel_item(it) else it) for read, it in self.loading]
          if self.held is not None and self._cancel_item(self.held):
              self.held = None
-@@ -2556,6 +2559,11 @@ class GlmScheduler(Scheduler):
+@@ -2556,6 +2564,11 @@ class GlmScheduler(Scheduler):
                  self.decoder.flush_spill()
              finally:
                  flush.set()
@@ -2491,7 +2519,7 @@ index 06f33e7..b886c1d 100644
          for it in [it for it in self.loading if self.decoder.load_ready(it[0])]:
              self.loading.remove(it)
              try:
-@@ -2601,6 +2609,13 @@ class GlmScheduler(Scheduler):
+@@ -2601,6 +2614,13 @@ class GlmScheduler(Scheduler):
                      self.loading.append((read, item))
                      continue
              self.staged.discard(id(stream))
@@ -2505,7 +2533,7 @@ index 06f33e7..b886c1d 100644
              self.boxes[id(stream)] = box
              try:
                  self.decoder.admit(stream)
-@@ -2669,7 +2684,7 @@ class GlmScheduler(Scheduler):
+@@ -2669,7 +2689,7 @@ class GlmScheduler(Scheduler):
      def _iteration(self) -> None:
          self._cancel_waiting()
          self._yield()

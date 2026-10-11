@@ -96,6 +96,12 @@ run prefix-not-exported server/metrics.py "        if field in body:\n          
 # the page cache: every point file's pages dropped after its fsync (already so in the patch; pinned here)
 run small-files-keep-pages $B "            os.fsync(fd)\n            _drop_cache(fd)                                 # (clean now" "            os.fsync(fd)\n            pass                                 # (clean now"
 run pages-dropped-before-fsync $B "            os.fsync(fd)\n            _drop_cache(fd)                                 # (clean now" "            _drop_cache(fd)\n            os.fsync(fd)                                 # (clean now"
+# a read slot turns every round: the round settles the reads once its verify pass is queued
+run round-no-settle $MU "        if self.disk is not None and self.loads:\n            try:\n                self.disk.settle()" "        if False:\n            try:\n                self.disk.settle()"
+run round-settle-always $MU "        if self.disk is not None and self.loads:\n            try:\n                self.disk.settle()" "        if self.disk is not None:\n            try:\n                self.disk.settle()"
+run settle-oldest-only $B "        last = next((ev for _, ev in reversed(evs) if ev is not None), None)" "        last = next((ev for _, ev in evs if ev is not None), None)"
+run settle-frees-none $B "        for b, _ in evs:\n            self.free_reads.put(b)\n        self.read_events = []\n" "        pass\n"
+run settle-before-slots $B "        evs = getattr(self, \"read_events\", None)" "        evs = self.read_events"
 # the writer: a write slot's event made at start and reused (wojo#2's pump made one a block, the writer dropped it)
 run write-event-per-block $B "                    ev = self.slot_events[slot] if self.slot_events else None   # (made at start: a GPU's only)\n                    if ev is not None:\n                        ev.record()\n" "                    ev = None\n                    if self.dev_slot.device.type == \"cuda\":\n                        ev = torch.cuda.Event()\n                        ev.record()\n"
 rm -f "$OUT"
