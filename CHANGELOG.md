@@ -44,6 +44,14 @@ Every change to this recipe, newest first. Each release names the image it serve
   `: keepalive`, on the chat, completions, Messages and Responses streams; SSE clients skip comment lines, and the
   events are the same bytes. `SSE_KEEPALIVE_S=0` turns it off; a value that is not a number of seconds stops the
   server at start. Non-streamed replies are unchanged. CPU test: `tools/test_sse_keepalive.py`.
+- **A streamed Anthropic reply opens with the prompt's token count** (patch `0112-anthropic-stream-head-usage`,
+  by [kky42](https://github.com/kky42), fixing TensorFold #672): `message_start` carried `usage({})`, all zeros, and
+  the real counts only arrived in the final `message_delta`, so a client that reads prompt counts from the head
+  (Claude Code's context-window indicator) showed ~0% used on every streaming request. The CUDA chat handler now
+  hands its prepared prompt's length to the translated request's wire before the stream head, and the head reports
+  it whole (cache fields 0); the final delta keeps the engine's input/cache_read split, the two totals equal, and
+  no second render runs. The Mac server's head is written before its render, so it keeps the old zeros (in the
+  patch header). CPU check: `tools/test_anthropic_stream_head.py`.
 - **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
   while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
   half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at
