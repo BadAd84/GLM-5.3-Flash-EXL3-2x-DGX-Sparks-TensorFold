@@ -96,6 +96,8 @@ run prefix-not-exported server/metrics.py "        if field in body:\n          
 # the page cache: every point file's pages dropped after its fsync (already so in the patch; pinned here)
 run small-files-keep-pages $B "            os.fsync(fd)\n            _drop_cache(fd)                                 # (clean now" "            os.fsync(fd)\n            pass                                 # (clean now"
 run pages-dropped-before-fsync $B "            os.fsync(fd)\n            _drop_cache(fd)                                 # (clean now" "            _drop_cache(fd)\n            os.fsync(fd)                                 # (clean now"
+# the writer: a write slot's event made at start and reused (wojo#2's pump made one a block, the writer dropped it)
+run write-event-per-block $B "                    ev = self.slot_events[slot] if self.slot_events else None   # (made at start: a GPU's only)\n                    if ev is not None:\n                        ev.record()\n" "                    ev = None\n                    if self.dev_slot.device.type == \"cuda\":\n                        ev = torch.cuda.Event()\n                        ev.record()\n"
 rm -f "$OUT"
 echo "exit $bad"
 exit $bad

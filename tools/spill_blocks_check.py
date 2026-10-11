@@ -21,7 +21,8 @@ rows), with a stand-in small state, and MultiDecoder's own load and move paths o
 - a read that fails on a missing block file drops that name and the points naming it, not the points whose blocks
   are links to the same bytes (they still read back); one that fails on damaged bytes drops every name of them;
 - every op in multi's table has a sender, and /metrics carries the prefix wait's counters;
-- each of a point's files (.ids, .st, .json) has its pages dropped from the page cache after its fsync.
+- each of a point's files (.ids, .st, .json) has its pages dropped from the page cache after its fsync;
+- a staged block records its write slot's own event (made at start), and the writer waits on that one.
 Exit code 1 when a check fails; tools/spill_blocks_mutants.sh runs it on faithful mutants of each fix.
 """
 import inspect
@@ -469,6 +470,32 @@ key = S.point_key(ids)
 for suffix in (".ids", ".st", ".json"):
     mine = [what for what, f in events if f == f".{key}{suffix}"]
     check(f"pages: {suffix} dropped from the page cache after its fsync", mine == ["fsync", "drop"])
+
+
+class Rec:
+    """A slot's event: counts its records and the writer's waits on it."""
+
+    def __init__(self) -> None:
+        self.records = self.syncs = 0
+
+    def record(self, stream=None) -> None:
+        self.records += 1
+
+    def synchronize(self) -> None:
+        self.syncs += 1
+
+
+ar = arena(102)
+st = store(ar, "wevents")
+st.ring()
+st.slot_events = [Rec() for _ in st.slots]          # (made at start on a GPU; none on the host)
+ids, kept = stored(st, ar, 3 * ALIGN - 6, 103)      # two blocks staged by the pumps, the tail copied at keep
+staged = st.stats["staged_blocks"]
+check("write: a staged block records its slot's own event, made at start, and the writer waits on that one (no event "
+      "made or dropped a block)", staged == 2 and sum(r.records for r in st.slot_events) == staged
+      and sum(r.syncs for r in st.slot_events) == staged)
+_, _, back = load_rows(st, ar, S.point_key(ids), Pool(ROWS).add(0, align_up(3 * ALIGN - 6)), 3 * ALIGN - 6)
+check("write: its rows read back as kept", back is not None and same(back, kept))
 
 print("all passed" if not fails else f"FAILED: {fails}", flush=True)
 os._exit(1 if fails else 0)

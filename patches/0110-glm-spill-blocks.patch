@@ -11,10 +11,10 @@
 # for issue #122, reported by @xiepengqi; the rest by @wojo. Builds on 0088-glm-spill-tier. Apache-2.0.
 diff --git tensorfold/cuda/spill_blocks.py tensorfold/cuda/spill_blocks.py
 new file mode 100644
-index 0000000..86b3da2
+index 0000000..027a0f4
 --- /dev/null
 +++ tensorfold/cuda/spill_blocks.py
-@@ -0,0 +1,1674 @@
+@@ -0,0 +1,1683 @@
 +"""The spill tier's block store for a shared pool of cache rows (``tensorfold serve --spill-gib`` with several streams):
 +every kept prompt state is written to this rank's disk when it is kept, so it survives an eviction, a restart and a
 +crash, and a later request that extends the same tokens reads it back instead of prefilling them.
@@ -500,6 +500,7 @@ index 0000000..86b3da2
 +        self.slots: list[torch.Tensor] = []
 +        self.free_slots: queue.Queue = queue.Queue()
 +        self.dev_slot: torch.Tensor | None = None
++        self.slot_events: list = []                        # a write slot's event, reused by every block it stages
 +        self.read_slots: list[torch.Tensor] = []
 +        self._hasher = ThreadPoolExecutor(2, thread_name_prefix=f"spill-hash-{self.rank}")
 +        self._readers = ThreadPoolExecutor(READERS, thread_name_prefix=f"spill-read-{self.rank}")
@@ -655,7 +656,10 @@ index 0000000..86b3da2
 +    # -- the staging ring and read buffers ---------------------------------------------------------------------------
 +    def ring(self) -> None:
 +        """Pinned host slots of one block each for writes (carved from ``spill.preallocate``'s write buffers, else
-+        allocated now), and as many for reads, all touched now; a device buffer a block is gathered in."""
++        allocated now), and as many for reads, all touched now; a device buffer a block is gathered in; an event a
++        write slot, made here: making or dropping one later (the writer dropped one a block) waits for the engine's
++        round to end whenever it decodes (CUDA holds every other thread's call while the round's readback waits on the
++        default stream), ~27 ms a block beside a decoding stream."""
 +
 +        if self.slots:
 +            return
@@ -687,6 +691,11 @@ index 0000000..86b3da2
 +        if any(s.data_ptr() % _sp.ALIGN for s in self.slots + self.read_slots):
 +            self.direct = False
 +        self.dev_slot = torch.empty(per, dtype=torch.uint8, device=dev)
++        if dev.type == "cuda":
++            for _ in self.slots:
++                ev = torch.cuda.Event()
++                ev.record()                                 # (an event is made at its first record)
++                self.slot_events.append(ev)
 +        for i in range(len(self.slots)):
 +            self.free_slots.put(i)
 +
@@ -808,8 +817,9 @@ index 0000000..86b3da2
 +    def pump(self, limit: int | None = PUMP_BLOCKS) -> None:
 +        """Between rounds (the engine loop, every rank): the waiting states' next blocks, oldest first, into free slots
 +        - one device gather (a kernel: display-span rows too) and one copy to pinned memory each, on the current stream
-+        after whatever wrote the rows - handed to the writer with an event. A state whose blocks are all handed goes
-+        to the writer whole. Never waits; at most ``limit`` blocks (None: as many as the slots allow)."""
++        after whatever wrote the rows - handed to the writer with the slot's event (made at start, ``ring``). A state
++        whose blocks are all handed goes to the writer whole. Never waits; at most ``limit`` blocks (None: as many as
++        the slots allow)."""
 +
 +        if not self.pending:
 +            return
@@ -834,9 +844,8 @@ index 0000000..86b3da2
 +                    nb = sum(t.numel() for t in parts)
 +                    torch.cat(parts, out=self.dev_slot[:nb])
 +                    self.slots[slot][:nb].copy_(self.dev_slot[:nb], non_blocking=True)
-+                    ev = None
-+                    if self.dev_slot.device.type == "cuda":
-+                        ev = torch.cuda.Event()
++                    ev = self.slot_events[slot] if self.slot_events else None   # (made at start: a GPU's only)
++                    if ev is not None:
 +                        ev.record()
 +                except Exception as exc:                    # noqa: BLE001  (never the engine's: this state is not kept)
 +                    self.free_slots.put(slot)
