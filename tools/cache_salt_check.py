@@ -19,6 +19,11 @@ way, and the HTTP side's ``GlmApp`` field check and request hand-off:
   5. parallel: shared-prefix points come only from kept prompts of the request's own salt.
   6. serial: the same as 2 through ``generate`` (rank 0) and ``follow_one`` (rank 1, reading the header's salted flag),
      a salted state is ``_unwritable`` ("salted") for the spill tier, ``_shared`` reads only its own salt's prompts.
+  7. both engines: a prompt kept salted and the same prompt kept unsalted both stay (neither resumes the other, so
+     replacing one with the other only lost a state): an unsalted replay after a salted request of the same ids
+     resumes as before, and the other way round; two salts of the same ids still replace each other (rank 1 knows
+     only that a state is salted); both ranks keep the same states in the same order, rank 1's serial resume taking
+     the state as salted as rank 0's.
 
 Prints ok / FAIL lines and "all passed"; exit 1 when a check fails."""
 import sys as _sys  # an uncaught raise prints a FAIL line (a kill needs one)
@@ -234,6 +239,19 @@ def parallel_isolation():
           and {"A", "B", "pair-1", "pair-2"} & {getattr(c, "salt", None) for c in r0.kept})
 
 
+def parallel_same_ids():
+    r0, r1 = ranks()
+    r = prompt_of(1016, 5)                       # 1,024 ids, on the grid: a replay resumes the whole prompt
+    got = [run_salted(r0, r, None), run_salted(r0, r, "s"), run_salted(r0, r, None), run_salted(r0, r, "s")]
+    check(f"parallel: kept salted and unsalted, the same ids: each replay resumes its own ({got})",
+          got == [0, 0, len(r), len(r)])
+    q = prompt_of(1016, 5)
+    two = [run_salted(r0, q, "a"), run_salted(r0, q, "b"), run_salted(r0, q, "a")]
+    check(f"parallel: two salts of the same ids replace each other, as on rank 1 ({two})", two == [0, 0, 0])
+    check("parallel: both ranks keep the same states, salted alike (the same ids kept both ways)",
+          salts_on_ranks(r0, r1) and [c.kid for c in r0.kept] == [c.kid for c in r1.kept])
+
+
 class TierRec:
     """The NVMe tier, recording: every state queued for disk, every lookup; it holds nothing (``best`` -> None)."""
 
@@ -418,6 +436,22 @@ def serial():
                                                                       for c in g1.cache]
               and {c.salt for c in g1.cache} == {None, ""})
         check(f"serial: the wire is drained ({len(wire)} left)", not wire)
+        w2: list = []
+        h0, h1 = serial_engine(0, w2), serial_engine(1, w2)
+
+        def gen2(prompt, salt):
+            h0.request.cache_salt = salt
+            stats = h0.generate(list(prompt), 1, None, lambda t: None)
+            h1.follow_one()
+            return stats["cached"]
+
+        r2 = prompt_of(1016, 5)
+        both = [gen2(r2, None), gen2(r2, "s"), gen2(r2, "s"), gen2(r2, None), gen2(r2, "s")]
+        check(f"serial: kept salted and unsalted, the same ids: each replay resumes its own ({both})",
+              both == [0, 0, len(r2), len(r2), len(r2)])
+        check("serial: both ranks keep the same states in the same order (rank 1 resumes the state as salted as "
+              "rank 0's)", [(len(c.ids), c.salt is not None) for c in h0.cache]
+              == [(len(c.ids), c.salt is not None) for c in h1.cache] and len(h0.cache) == 2)
         g0.live = []
         salted = [c for c in g0.cache if c.salt is not None]
         plain = [c for c in g0.cache if c.salt is None]
@@ -456,7 +490,8 @@ def serial():
 
 
 def main() -> int:
-    for part in (app_side, parallel_isolation, parallel_tier, parallel_spill, parallel_shared, serial):
+    for part in (app_side, parallel_isolation, parallel_same_ids, parallel_tier, parallel_spill, parallel_shared,
+                 serial):
         try:
             part()
         except Exception as exc:                 # a part that raises fails the check; the rest still run

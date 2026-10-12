@@ -11,11 +11,14 @@
 #    (`_check_fields`); the salt reaches the engine through `engine.request.cache_salt`, beside policy / stop_eos.
 # 2. A kept state carries the salt of the request that kept it (`snap.salt`; rank 1 holds "" for a salted one: it
 #    only needs to know there is one). `_resume` (parallel and serial) matches only states of the request's own salt;
-#    None is unsalted, exactly as before. Shared-prefix points come only from its own salt's kept prompts.
+#    None is unsalted, exactly as before. Shared-prefix points come only from its own salt's kept prompts. A state
+#    kept with the same ids replaces an older one only when both are salted or neither is (`_keep`, `_remember`):
+#    neither resumes the other, so a salted request no longer drops an unsalted conversation's state, nor the other
+#    way round (two salts of the same ids still replace each other: rank 1 knows only that a state is salted).
 # 3. A salted request reads nothing from the spill store (`prestage`, `find`) and a salted state is never written to
 #    it (`_unspillable` / `_unwritable` "salted"): the store keys entries by ids, which cannot tell salts apart.
 # 4. The salted flag goes to rank 1 as the ADMIT's last value (parallel) or the serial header's last value, so both
-#    ranks decide spill writes alike.
+#    ranks decide spill writes and replacements alike, and rank 1's serial resume takes the state as salted as rank 0's.
 # Unsalted requests are unchanged; replies are unchanged (a salt only turns a resume into a fresh prefill of the same
 # ids). CPU check: tools/cache_salt_check.py.
 diff --git tensorfold/families/glm5_next/cuda/app.py tensorfold/families/glm5_next/cuda/app.py
@@ -94,7 +97,19 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
          if snap.rows is None and self.live[:n] != list(snap.ids):
              return "no_rows"
          if self.grid and n % self.grid:
-@@ -1316,8 +1320,9 @@ class GlmEngine:
+@@ -1227,7 +1231,10 @@ class GlmEngine:
+               f"{time.perf_counter() - t:.1f}s{'' if ok else ' (not finished)'}", flush=True)
+ 
+     def _remember(self, snap) -> None:
+-        for c in [c for c in self.cache if c.ids == snap.ids and c is not snap]:
++        # a kept state of the same ids gives way to it, unless only one of the two is salted (patch 0117: neither
++        # resumes the other)
++        for c in [c for c in self.cache if c.ids == snap.ids and c is not snap
++                  and (getattr(c, "salt", None) is None) == (getattr(snap, "salt", None) is None)]:
+             self._drop(c)
+         self.cache[:] = [c for c in self.cache if c is not snap] + [snap]   # a resumed prompt kept again moves last
+         dropped = False
+@@ -1316,8 +1323,9 @@ class GlmEngine:
  
          return getattr(self, "drafter", None) if self.shared else None
  
@@ -106,7 +121,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
  
          if not self.shared:
              return []
-@@ -1326,6 +1331,8 @@ class GlmEngine:
+@@ -1326,6 +1334,8 @@ class GlmEngine:
          cut = len(hit.ids) if hit is not None else 0
          known = []
          for c in self.cache:                  # a kept prompt's ids as an array, made once (ids never change)
@@ -115,7 +130,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
              if getattr(c, "ids_array", None) is None:
                  c.ids_array = np.asarray(c.ids, dtype=np.int64)
              known.append(c.ids_array)
-@@ -1338,18 +1345,21 @@ class GlmEngine:
+@@ -1338,18 +1348,21 @@ class GlmEngine:
          return sum(snapshot_bytes(c) for c in self.cache)
  
      def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
@@ -141,7 +156,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
          from .decode import (DepthPolicy, StopVote, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot,
                               whole)
          from .drafter_choice import DrafterChoice, auto_decode
-@@ -1403,6 +1413,7 @@ class GlmEngine:
+@@ -1403,6 +1416,7 @@ class GlmEngine:
              self.cache = [c for c in self.cache if c is not hit] + [hit]
          for snap in kept:
              snap.images = feed is not None
@@ -149,7 +164,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
              self._remember(snap)
          if not kept and draft and feed is None and hit is not None:     # the resume point is the grid point: newest
              self.cache = [c for c in self.cache if c is not hit] + [hit]
-@@ -1479,12 +1490,13 @@ class GlmEngine:
+@@ -1479,12 +1493,13 @@ class GlmEngine:
              spec = getattr(self.request, "policy", None) or self.policy
          code = self._effective(encode_policy(spec))
          stop_eos = bool(getattr(self.request, "stop_eos", True))
@@ -164,7 +179,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
              stats.update(policy=spec, drafts=draft)
              return stats
          positions: list[int] = []
-@@ -1505,9 +1517,10 @@ class GlmEngine:
+@@ -1505,9 +1520,10 @@ class GlmEngine:
                  raise ValueError(f"the tower gave {rows.shape[0]} rows for {len(positions)} image positions")
              feed = VisionFeed(self, positions, rows)
              feed.encode_s = time.perf_counter() - t
@@ -177,7 +192,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
              disk = self.spill.find(list(prompt), grid=self.grid, usable=lambda e: self._fit(
                  e.n, e.fields.get("drafter_end", -1), e.fields.get("mtp_len", -1), code))
              if disk is not None and hit is not None and len(hit.ids) >= disk.n:
-@@ -1516,7 +1529,7 @@ class GlmEngine:
+@@ -1516,7 +1532,7 @@ class GlmEngine:
              import types
  
              hit = types.SimpleNamespace(ids=list(prompt[:disk.n]))
@@ -186,7 +201,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
          seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
          cached = -disk.n if disk is not None else len(hit.ids) if hit is not None else 0
          header = [max_tokens, int(stop_eos), int(draft), cached,
-@@ -1524,7 +1537,7 @@ class GlmEngine:
+@@ -1524,7 +1540,7 @@ class GlmEngine:
                    *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
                    *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
                    int(constraint is not None), len(positions),
@@ -195,7 +210,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
          from tensorfold.engine.grammar import pack
  
          self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
-@@ -1539,7 +1552,7 @@ class GlmEngine:
+@@ -1539,7 +1555,7 @@ class GlmEngine:
          if self.spill is not None:                     # pending copies of the live caches end before they change
              self._spill_wait()
          stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint, feed,
@@ -204,7 +219,7 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
          stats.update(policy=spec, drafts=draft)
          if hasattr(self.comm, "check"):                  # a RoCE wait that timed out inside a graph surfaces here
              self.comm.check()
-@@ -1567,7 +1580,8 @@ class GlmEngine:
+@@ -1567,7 +1583,8 @@ class GlmEngine:
          if max_tokens == 0 and self.spill is not None:     # rank 0's clean shutdown: the spill tier's flush
              self._do_flush(self._share(None), self.spill.cfg.flush_s)
              return
@@ -214,7 +229,16 @@ diff --git tensorfold/families/glm5_next/cuda/engine.py tensorfold/families/glm5
          prompt = self._share(None)
          packed = self._share(None) if shaped else []
          constraint = None
-@@ -1590,7 +1604,7 @@ class GlmEngine:
+@@ -1584,13 +1601,15 @@ class GlmEngine:
+         if cached < 0:                              # rank 0 resumes from a prefix stored on disk: read ours too
+             hit = self._spill_load(list(prompt[:-cached]), code)
+         elif cached:
+-            hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids), None)
++            # patch 0117: the state as salted as rank 0's hit (the same ids may be kept salted and not)
++            hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids
++                        and (getattr(c, "salt", None) is not None) == salted), None)
+             if hit is None:
+                 raise RuntimeError(f"rank {self.rank} has no snapshot of the {cached} tokens rank 0 resumes from")
          if self.spill is not None:
              self._spill_wait()
          self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
@@ -311,7 +335,7 @@ diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_
              short = n < len(key) or (n == len(key) and c.head is not None)
              if fits and short and c.key is not None and key[:n] == c.key and (best is None or n > len(best.ids)):
                  best = c
-@@ -1097,6 +1102,7 @@ class MultiDecoder:
+@@ -1097,13 +1102,16 @@ class MultiDecoder:
          # rank 0's key: a text prompt's is its ids (shared, not a second list); rank 1 keeps none
          snap.key = None if lane.key is None else snap.ids if not lane.images else lane.key[:n]
          snap.images = lane.images
@@ -319,7 +343,18 @@ diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_
          snap.kid = self.next_kid
          self.next_kid += 1
          snap.extent = lane.extent
-@@ -1327,6 +1333,8 @@ class MultiDecoder:
+         snap.shared = n in lane.shared
+         snap.own, snap.chat = bool(own), int(lane.chat)
+-        # the same ids: the same prompt, unless pictures are in it (rank 1 has no keys; rank 0 resumes by key)
+-        for c in [c for c in self.kept if c.ids == snap.ids and not (c.images or snap.images)]:
++        # the same ids: the same prompt, unless pictures are in it (rank 1 has no keys; rank 0 resumes by key) or only
++        # one of the two is salted (patch 0117: neither resumes the other; salted or not is all rank 1 knows of a salt)
++        for c in [c for c in self.kept if c.ids == snap.ids and not (c.images or snap.images)
++                  and (getattr(c, "salt", None) is None) == (snap.salt is None)]:
+             self._drop(c, spill=False)
+         lane.extent.kept.append(snap)
+         self.kept.append(snap)
+@@ -1327,6 +1335,8 @@ class MultiDecoder:
  
          if c.images and c.key is None:
              return "images"                     # pictures without content keys: nothing tells them apart
@@ -328,7 +363,7 @@ diff --git tensorfold/families/glm5_next/cuda/multi.py tensorfold/families/glm5_
          n = len(c.ids)
          if n < self.disk.cfg.min_tokens:
              return "short"
-@@ -1434,8 +1442,8 @@ class MultiDecoder:
+@@ -1434,8 +1444,8 @@ class MultiDecoder:
          """Rank 0, before a request is admitted: a read of the stored prompt its prompt extends, or None (nothing to
          read, or no room). The scheduler admits the request once ``load_ready``, after ``complete_load``."""
  
