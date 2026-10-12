@@ -209,6 +209,8 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
 - `0118-glm-broken-health-exit` (`/health` and `/metrics` report a broken engine; opt-in `TF_GLM_EXIT_ON_BROKEN`): by
   [bblicke1](https://github.com/bblicke1), [pull request #146](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/146).
 - `0120-glm-fork-point-shared` (a kept state a second conversation goes on from is a shared prefix): the diagnosis and the first fix (the writer's next ids kept with a state, the state flagged when a resumed prompt goes on otherwise, the flag kept when the same ids are kept again) are by [RyanLeeUPC](https://github.com/RyanLeeUPC) in [issue #121](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/121); the rest by [BadAd84](https://github.com/BadAd84).
+- `0121-glm-kept-reasoning-linear` (kept reasoning restored in one pass over the conversation): by
+  [cawilliamson](https://github.com/cawilliamson).
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or
   quote as context stays under TensorFold's licenses (Apache 2.0, and MIT for code written before v0.6.0; see
