@@ -118,10 +118,18 @@ part of this recipe. See the [qualification note](docs/MCDMA_MAC_STUDIO_QUALIFIC
   subnet or each in its own (NVIDIA's two-Spark playbook gives them different ones): both are then used, as is a second
   cabled port in the link's subnet. A prompt chunk's all-gather is ~1.8x faster on two rails; one rail is one x4
   (~112 Gb/s of the port's 200).
+  Give the link's addresses statically (no DHCP, no NetworkManager "shared" mode) and do not re-activate the
+  connection while the server runs: the RoCE GID index is chosen when the engine starts and nothing re-checks it, so
+  an address that moves under a running engine can leave the ranks waiting on each other (issue #196; the
+  reporter's cure was a static address and one subnet per PCIe function).
 - **Key-based ssh** from the first Spark (the head, which runs `./start.sh` and the API) to the second (the worker):
   `ssh-copy-id user@<worker>` (after `ssh-keygen -t ed25519` if you have no key); check with
   `ssh -o BatchMode=yes user@<worker> true`.
 - Docker with the NVIDIA container runtime, your user in the `docker` group, and `rsync`, on both Sparks.
+  On each Spark, also keep the NVIDIA CDI spec generated (`sudo systemctl enable --now nvidia-cdi-refresh.path
+  nvidia-cdi-refresh.service`, then recreate the containers; `nvidia-ctk cdi list` shows `nvidia.com/gpu=all`):
+  without it, a host `systemctl daemon-reload` can remove the GPU from a running container, and the next kernel
+  load fails with `operation not permitted` (issue #150). `prepare.sh` warns when it cannot see the device.
 - **Disk, on each Spark:** ~205 GB: ~176 GB (164 GiB) for the checkpoint and ~2.3 GB for DFlash2 under
   `~/.cache/huggingface`, ~25 GB for the image under Docker's root. `prepare.sh` asks for what the download still
   needs (files already in the cache, from an earlier revision say, do not count; 180 GB, `MIN_FREE_GB`, when it cannot
@@ -402,6 +410,15 @@ accept the token, a `403` that its account has not agreed to the terms yet (or t
 access to public gated repositories). The first start downloads the Ablit checkpoint (~176 GB, beside the
 published one in the cache) and, with `WORKER_WEIGHTS=copy`, copies it to the worker. `ABLIT=0` goes back to the
 published checkpoint, which stays in the cache.
+
+The Ablit weights keep the stock DFlash2 drafter. The edit changes `o_proj` in layers 15-46, and three of the drafter's
+five taps (layers 24, 33, 42) read downstream of it, so it accepts a little less than on the published checkpoint
+(a controlled run on agent turns: 3.38 -> 3.06 tokens a round, decode 62.4 -> 60.3 tok/s over 73 requests). A drafter
+whose `fc` layer was refitted by someone else for an abliterated GLM-5.3-Flash
+([`gorbatjovy/GLM-5.3-Flash-DFlash2-ablit-fc`](https://huggingface.co/gorbatjovy/GLM-5.3-Flash-DFlash2-ablit-fc),
+`DFLASH2_ID`) was measured twice on the exact Ablit weights (issue #83, 77 requests by troshab and 12 languages at
+fixed draft lengths by gulldan): it is right more often but drafts shorter chains, tokens a round are equal or lower,
+and decode speed is flat, so it is not recommended here.
 
 ## 3 Sparks (experimental)
 
