@@ -5,6 +5,23 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **`prepare.sh` warns when a node's NVIDIA CDI device cannot be confirmed** (by
+  [SvangenStudios](https://github.com/SvangenStudios), [pull request #207](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/207),
+  issue #150): without the host's CDI spec, a `systemctl daemon-reload` can remove the GPU from a running container's
+  cgroup and the next kernel load fails with `operation not permitted`. `prepare.sh` now runs `nvidia-ctk cdi list`
+  on the head and on each worker and warns, with the fix, when `nvidia.com/gpu=all` is not listed (an ssh failure is
+  reported as such). A warning only; nothing is changed on the node. The README's Requirements say the same.
+- **README: `/no_think` in prompt text does not disable thinking** (by
+  [travellingsoldier85](https://github.com/travellingsoldier85), [pull request #193](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/193)):
+  the template does not read a `/no_think` or `/think` suffix, so a request that sends one keeps the server's
+  default; the README names the settings that do work and says an empty `content` with `finish_reason: "length"` is
+  a reply to retry.
+- **README: static addresses for the link (issue #196) and the Ablit weights' drafter (issue #83)**: a moved RoCE
+  GID is not noticed by a running engine, so the Requirements ask for static addresses; the Ablit section records
+  why the stock DFlash2 drafter stays for `ABLIT=1`, with the two controlled runs by
+  [troshab](https://github.com/troshab) and [gulldan](https://github.com/gulldan) that measured the refitted one.
+- **CREDITS: four patch credits that had lost their name** (0101, 0103, 0105, 0107, by
+  [BadAd84](https://github.com/BadAd84)) are complete again and sit in the Patches section.
 - **A chat's pictures keep their size past the 8th, so it still resumes from its kept prompt state**
   (`TENSORFOLD_GLM_REQUEST_IMAGE_TOKENS`, by [abadawe-dev](https://github.com/abadawe-dev)): TensorFold caps a picture
   at min(`IMAGE_TOKENS`, the request's picture budget / its pictures), and its own budget of 16,384 holds 8 pictures at
