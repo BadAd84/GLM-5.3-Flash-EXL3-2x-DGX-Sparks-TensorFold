@@ -191,6 +191,24 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   `TF_GLM_DRAFT_PRELAUNCH`): by [BadAd84](https://github.com/BadAd84).
 - `0102-glm-prompt-matmul-tile` (a prompt chunk's dense projections on tile 9 or 3): by [BadAd84](https://github.com/BadAd84).
 - `0103-glm-qmm-decode-noclusters` (decode matmuls reduce through the partials buffer at few rows): by [BadAd84](https://github.com/BadAd84).
+- `0109-responses-tool-image` (image parts in a Responses `function_call_output`): by
+  [StrayDragon](https://github.com/StrayDragon), [pull request #175](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/175) for [issue #162](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/162), backporting the `_output` hunk of TensorFold commit 69d0ca9 (v0.6.3, TensorFold issue #235).
+- `0110-vision-mpo-first-frame` (an iPhone MPO JPEG is read from its first frame): the diagnosis (the `n_frames` guard refuses
+  an MPO's second frame) is by [robertforbes68](https://github.com/robertforbes68) in [issue #201](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/201); the code is our own.
+- `0112-anthropic-stream-head-usage` (a streamed Messages head carries the prompt's token count): by
+  [kky42](https://github.com/kky42) (commits authored as evilpsycho42), [pull request #145](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/145), mirroring the Zig server's fix (TensorFold PR #672).
+- `0114-glm-tool-tag-mention` (a tool call after a quoted `<tool_call>` tag is a call again): by
+  [kky42](https://github.com/kky42) (commits authored as evilpsycho42), [pull request #134](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/134).
+- `0115-glm-unoffered-tool-call` (a call to a tool the request did not offer, reported): by [kky42](https://github.com/kky42) (commits authored as evilpsycho42), [pull request #140](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/140); its report adapted from
+  [BadAd84](https://github.com/BadAd84)'s `0114-glm-tool-call-rejections` (#137).
+- `0116-glm-literal-added-tokens` (a quoted added token stays text): by [ahinore](https://github.com/ahinore) (the commit is
+  authored as iegamo), [pull request #164](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/164).
+- `0117-glm-reply-marker-ids` (a reply's markup is read at its marker tokens): by [ahinore](https://github.com/ahinore),
+  [pull request #203](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/203), the reply's side of `0116`'s rule. It follows `TENSORFOLD_REPLY_IDS` of
+  [bertholomus/TensorFold](https://github.com/bertholomus/TensorFold) (commit 113a151c, in Zig, which credits the rule to DeepInfer's output parsing); the Python code is ahinore's.
+- `0118-glm-broken-health-exit` (`/health` and `/metrics` report a broken engine; opt-in `TF_GLM_EXIT_ON_BROKEN`): by
+  [bblicke1](https://github.com/bblicke1), [pull request #146](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/146).
+- `0120-glm-fork-point-shared` (a kept state a second conversation goes on from is a shared prefix): the diagnosis and the first fix (the writer's next ids kept with a state, the state flagged when a resumed prompt goes on otherwise, the flag kept when the same ids are kept again) are by [RyanLeeUPC](https://github.com/RyanLeeUPC) in [issue #121](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/121); the rest by [BadAd84](https://github.com/BadAd84).
 - Every patch, except the parts credited above: by MiaAI-Lab, developed with
   [Claude Code](https://claude.com/claude-code), under the Apache License 2.0; the TensorFold code the patches modify or
   quote as context stays under TensorFold's licenses (Apache 2.0, and MIT for code written before v0.6.0; see
@@ -223,17 +241,3 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   128 GB unified memory), two of them linked by their ConnectX-7 ports: every number in the README was measured there.
 
 If you believe something here is missing or credited wrongly, please open an issue.
-- `0101-glm-prompt-select-floor` (a prompt chunk's pool selection from one pass over the scores): by
-- `0105-glm-prompt-scores-cuda` (a prompt chunk's indexer scoring in CUDA, Triton's instruction order): by
-- `0106-glm-sparse-onepass-cuda` (a prompt chunk's sparse attention in CUDA, Triton's instruction order):
-  by [BadAd84](https://github.com/BadAd84).
-- `0107-glm-decode-indexer` (a decode window's indexer: the scoring in CUDA, the selection in one pass): by
-- `0104-glm-seg-attention-tp3-tiles` (32-head tiles from 5 rows at 17-24 heads): by [BadAd84](https://github.com/BadAd84).
-- `0108-glm-seg-chunks-cuda` (a decode window's latent attention chunk pass in CUDA): by [BadAd84](https://github.com/BadAd84).
-- `0115-glm-unoffered-tool-call` (a call to a tool the request did not offer, reported): its report adapted from
-  [BadAd84](https://github.com/BadAd84)'s `0114-glm-tool-call-rejections` (#137).
-- `0120-glm-fork-point-shared` (a kept state a second conversation goes on from is a shared prefix): the diagnosis and the first fix (the writer's next ids kept with a state, the state flagged when a resumed prompt goes on otherwise, the flag kept when the same ids are kept again) are by [RyanLeeUPC](https://github.com/RyanLeeUPC) in [issue #121](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/121); the rest by [BadAd84](https://github.com/BadAd84).
-- `0100-glm-draft-prelaunch` (the next round's DFlash2 block pass launched at a decode round's end,
-  `TF_GLM_DRAFT_PRELAUNCH`): by [BadAd84](https://github.com/BadAd84).
-- `0102-glm-prompt-matmul-tile` (a prompt chunk's dense projections on tile 9 or 3): by [BadAd84](https://github.com/BadAd84).
-- `0103-glm-qmm-decode-noclusters` (decode matmuls reduce through the partials buffer at few rows): by
