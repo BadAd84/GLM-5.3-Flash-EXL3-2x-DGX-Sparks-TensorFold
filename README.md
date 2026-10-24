@@ -238,7 +238,7 @@ By default only data URLs are accepted; `VISION_URLS=1` also lets the server fet
    model, drafter, revision, image or worker).
 2. **Checks:** the arguments (TensorFold's own parser), the link, the previous server (stopped on `restart`, or when
    only one rank is up; a stopped container left from an earlier run is removed, its log saved first), the port, free memory (a warning
-   below ~110 GiB on either Spark).
+   below ~110 GiB on either Spark, counting the pages still parked on the kernel's per-CPU free lists: see below).
 3. **Launch:** rank 1 on the worker over ssh, then rank 0 and the API here, with the settings from `scripts/config.sh`.
 4. **Loading:** rank 0's log as it comes, and every 15 s the elapsed time and how much of the startup estimate is on
    each Spark's GPU; if a rank stops, both ranks' last log lines and why.
@@ -298,6 +298,16 @@ moving caches instead, patch `0074`); `/health` shows `pool_tokens`, `pool_free_
 TensorFold's budget on each Spark is `MemAvailable` at start minus a host reserve (`MEMORY_RESERVE_GIB`, 14.5 GiB here;
 TensorFold's own default is a tenth of RAM). The server uses about 10 GiB beyond its own estimate at its peak, so the
 reserve also sets the lowest free memory.
+
+TensorFold reads `MemAvailable` once, when it starts. The image copy in `prepare.sh` (`docker save` on the head,
+`docker load` on the worker) frees tens of GiB of page cache at once, and the kernel parks 5-9 GiB of it on its per-CPU
+free lists (the `count:` lines under `pagesets` in `/proc/zoneinfo`), in neither `MemFree` nor `MemAvailable`; it comes
+back at ~0.05-0.1 GiB/s over the next 1-2 minutes, and the first start of a new image also parks 2.4 GiB compiling its kernels
+a second before the budget is read. A first start used to land in that window: 89.44 GiB budgeted on rank 0 where a
+warm restart got 94.86, which cut the kept prompt states from 32 to 2 and shrank the pool. Patch `0122` makes the
+engine count the pages parked above the lists' resting level (read once, at start-up, and logged), so the first start
+budgets 94.58 GiB (rank 1 95.20); `start.sh`'s ~110 GiB check counts them too.
+
 The GB10 firmware also keeps about 2 GiB for a screen, which a headless Spark never uses and `MemAvailable` never
 counts. With `PARALLEL` above 1, `DISPLAY_KV_MIB=1792` (patch 0072) adds that much of it to the pool on every rank, on
 top of `KV_POOL_GIB`: the first DSA layers' latent planes sit in a span of ordinary memory with the reservation mapped
@@ -780,6 +790,7 @@ with [sparkDash](https://github.com/MiaAI-Lab/sparkDash) ([Performance](#perform
 | `tools/pool_pressure.py [size]` | on a fresh server with nothing else sending requests: two conversations of ~`size` tokens (default 30000) take a turn each, others fill the pool, then each takes another turn; exit 1 when a turn resumes less than 90% of its previous prompt, 2 when the kept-prompt cap stops the fill first (a smaller pool runs it faster: `CONTEXT=131072 KV_POOL_GIB=0.5`) |
 | `tools/pool_room_check.py` | patch 0074's checks, run in the image (`docker run ... --entrypoint python`, see the file): the pool's room-making on a CPU arena, what it evicts and moves, and rank 1 replaying the same ops |
 | `tools/test_broken_health_exit.py --source-root DIR` | CPU-only broken-state checks against patched TensorFold: settings, first cause, request refusal, round/load/drop errors, health and metrics, subprocess exit (no Torch/GPU) |
+| `tools/parked_pages_check.py` | patch 0122's checks, run in the image (`docker run ... --entrypoint python`, see the file) or against the patched source with `PYTHONPATH`: the start-up budget's count of the pages parked on the kernel's per-CPU free lists beyond their resting level, on synthetic zoneinfo / meminfo files (several CPUs, zones and nodes, a warm start, no `high_min`, no page lists, unreadable and garbled files) and the `available_bytes` / `page_room` figures that include them; no GPU, no model |
 | `tools/test_queued_cancellation.py --source-root DIR` | patch 0073's checks on the CPU, against TensorFold's source with the patches applied (no GPU, no server): requests that wait while every slot is busy and whose client leaves are dropped at once, in queue order; `--expect-stock` before 0073 shows the old wait |
 | `tools/test_sse_keepalive.py --source-root DIR` | patch 0111's checks on the CPU, against TensorFold's source with the patches applied (no GPU, no server): every streaming route of the real handler, over a stub that stays silent for 3 s, gets `: keepalive` about once a second with `TENSORFOLD_SSE_KEEPALIVE_S=1` and none after its last event; without its comment lines each stream is byte-identical to the stream with `0`; non-streamed replies unchanged; no thread outlives its request; `--expect-stock` before 0111 shows the silence |
 | `tools/kept_reasoning_check.py --source-root DIR` | patch 0121's checks on the CPU, against TensorFold's source with the patches applied: `restore` against the stock implementation (embedded) on 300 random agent conversations (LRU eviction, renumbered ids and re-serialised arguments included), and one pass over a ~2,100-message conversation; `--expect-stock` reproduces the quadratic restore on the unpatched source |
