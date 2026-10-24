@@ -1,9 +1,9 @@
-"""CPU-only test of patch 0112: a ``<tool_call>`` tag a reply mentions is text, not the start of a call.
+"""CPU-only test of patch 0114: a ``<tool_call>`` tag a reply mentions is text, not the start of a call.
 
   python3 -B tools/test_think_tag_mention.py --source-root /path/to/patched/src
 No Torch/CUDA, sockets or source writes. Runs replies through the real ``ThinkSplit``, ``parse_tool_calls``,
 ``hide_tool_calls`` and ``GlmCallStreamer`` as the CUDA server does, whole and streamed one character at a time (with
-and without the call hold), and checks the reasoning, the content and the calls. Before 0112 a mention matched up to
+and without the call hold), and checks the reasoning, the content and the calls. Before 0114 a mention matched up to
 the next ``</tool_call>``: in the think block through ``</think>`` to the real call, in the answer through the real
 call, so the call came back as content text with no tool_calls (live on v1.10: every time the model quoted the tag)."""
 from __future__ import annotations

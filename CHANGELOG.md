@@ -52,7 +52,7 @@ Every change to this recipe, newest first. Each release names the image it serve
   it whole (cache fields 0); the final delta keeps the engine's input/cache_read split, the two totals equal, and
   no second render runs. The Mac server's head is written before its render, so it keeps the old zeros (in the
   patch header). CPU check: `tools/test_anthropic_stream_head.py`.
-- **A tool call after a quoted `<tool_call>` tag is a call again** (patch `0112-glm-tool-tag-mention`, by
+- **A tool call after a quoted `<tool_call>` tag is a call again** (patch `0114-glm-tool-tag-mention`, by
   [kky42](https://github.com/kky42)): every place the server finds GLM calls ran a block from any `<tool_call>` to the
   next `</tool_call>`, so a reply that mentioned the tag ("the literal `<tool_call>` markup") before its real call made
   one unparseable block of both: across `</think>` in the reasoning (cut at the mention), across the prose in the
