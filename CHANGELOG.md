@@ -36,6 +36,17 @@ Every change to this recipe, newest first. Each release names the image it serve
   cold request of 50 full-size pictures (102,118 tokens) answers and resumes. Pictures past the 8th are no longer
   downscaled, so they cost up to 2,048 tokens each. `TENSORFOLD_GLM_REQUEST_IMAGE_TOKENS=16384` restores the shared
   budget. No patch and no image change. CPU check: `tools/picture_budget_check.py`.
+- **A phone photo (an iPhone MPO JPEG) is accepted** (patch `0110-vision-mpo-first-frame`, issue #201, diagnosed by
+  [robertforbes68](https://github.com/robertforbes68)): the decode guard refused any image whose `n_frames` was not 1, and
+  an MPO (what iPhones and many Android phones save as `.jpg`: the picture plus a preview, depth or gain map) reports 2
+  or more, so a photo straight from the phone got a 400 "animated and multipage images are unsupported". An MPO is now
+  read from its first frame, the only one ever decoded; the size and pixel limits apply as before, and animated WebP and
+  multi-frame PNG are still refused. CPU check: `tools/test_mpo_first_frame.py` (needs Pillow; fails without the patch).
+- **Pictures inside a Responses `function_call_output`** (patch `0109-responses-tool-image`, issue #162, by
+  [StrayDragon](https://github.com/StrayDragon), [pull request #175](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/175)):
+  an agent that returns a tool's screenshot as `input_image` parts got a 400 ("must be a string or input_text
+  parts"), although the chat route renders tool-result pictures. The `_output` hunk of TensorFold commit 69d0ca9 (v0.6.3)
+  now lets those parts through. CPU check: `tools/test_responses_tool_image.py` (fails without the patch).
 - **Streamed replies keep the connection alive while they wait** (patch `0111-server-sse-keepalive`, issue #106,
   reported with the first version of the patch by [stevehansen](https://github.com/stevehansen)): a streamed reply
   sent nothing between its first event and its first token, so a request waiting for a lane or filling a long prompt
