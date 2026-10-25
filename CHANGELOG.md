@@ -5,6 +5,13 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A request held for room no longer re-reads its stored prompt every round** (patch `0088-glm-spill-tier`, PR #210
+  by [nanashi66](https://github.com/nanashi66)): `GlmScheduler._admit` forgot a request's "its stored prompt was looked
+  for" mark before `admit`, so a request `NoRoom` held started the NVMe read of its state again in every retry round
+  (6 reads in 6 rounds in the check, 1 now). The mark now goes after `admit` succeeds or the request fails. Added when
+  taking it: a request whose first `prestage` read nothing (no room for the read yet) drops the mark, so the prompt
+  is looked for again and read once there is room (without that it would have prefilled from scratch). CPU test:
+  `tools/test_queued_cancellation.py` (two cases; fails on the unpatched source).
 - **KV sharding** (patch `0129-glm-kv-shard`, `TF_GLM_KV_SHARD=1`, off by default, by
   Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)): each
   conversation's MLA latent cache is stored once, on the Spark that owns it,
