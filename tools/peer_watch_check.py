@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch 0115's checks (issue #129: a worker restarted alone could never rejoin, and rank 0 served a dead pair).
+"""Patch 0131's checks (issue #129: a worker restarted alone could never rejoin, and rank 0 served a dead pair).
 
 CPU only, no GPU and no model: the ranks are processes on one machine meeting at TensorFold's own rendezvous,
 `tensorfold.cuda.comm.NCCL` with the real TCPStore, with only the NCCL library calls replaced by a stand-in (the
@@ -25,8 +25,14 @@ any FAIL. TENSORFOLD_PEER_TIMEOUT_S is 2 in the cases unless they say otherwise.
             writes 5 s after rank 0's exit (more than the timeout), then exits 0; no rank ended by the watch
   cadence   at TENSORFOLD_PEER_TIMEOUT_S=40 a rank beats every 2 s (not an eighth of 40)
   stopkill  rank 1 killed during rank 0's clean stop (4 s): rank 0 finishes the stop and exits 0
+  ownstore  rank 0's own store calls fail every beat: watching goes on (the process is still alive a second past
+            the first failure) and rank 0 ends only after the timeout of them ("own store has not answered");
+            round 1 returned from the first failure and never ended
+  nomark    the clean-stop mark cannot be written (announce_stop raises): the stop still runs the shutdown hook
+            (HOOK DONE) and exits 0 - a store that refuses the mark no longer skips the hook
   setting   TENSORFOLD_PEER_TIMEOUT_S: unset 120, 0 ends no rank, a bad value fails at start
-On TensorFold without the patch, `gone`, `back`, `headloss`, `orphan`, `cadence` and `setting` fail.
+On TensorFold without the patch, `gone`, `back`, `headloss`, `orphan`, `cadence` and `setting` fail; `ownstore`
+and `nomark` fail on round 1 of this patch (the watch thread returning at the first failure; the unguarded mark).
 """
 from __future__ import annotations
 
@@ -114,6 +120,28 @@ def child(role: str, port: int, hold: float, world: int, rank: int) -> int:
 
         serve(_App(hold), "127.0.0.1", int(os.environ["PEER_CHECK_HTTP"]))    # SIGTERM's handler set as it listens
         print("STOPPED", flush=True)
+        return 0
+    if role == "serve-nomark":                        # the clean-stop mark cannot be written: the hook still runs
+        from tensorfold.cuda.http import serve
+
+        def _refused() -> None:
+            raise RuntimeError("mark refused")
+
+        comm.announce_stop = _refused
+        serve(_App(hold), "127.0.0.1", int(os.environ["PEER_CHECK_HTTP"]))
+        print("STOPPED", flush=True)
+        return 0
+    if role == "r0ownfail":                           # rank 0 whose own store fails every beat after the first
+        class _Boom:
+            def add(self, key, n):
+                raise RuntimeError("store hiccup")
+
+            def check(self, keys):
+                return []
+
+        nccl.watch.store = _Boom()
+        print("ARMED", flush=True)
+        time.sleep(3600)                              # _end() exits; a watch that gave up just sleeps here forever
         return 0
     if role == "busy":                                # writing (a clean stop's flush) until released, at most ``hold`` s
         end = time.monotonic() + hold
@@ -387,6 +415,41 @@ def case_stopkill(tmp: Path) -> None:
         r0.kill(); r1.kill()
 
 
+def case_ownstore(tmp: Path) -> None:
+    r0, r1, ok = pair(free_port(), "2", tmp, "ownstore", r0_role="r0ownfail")
+    try:
+        result(ok, "ownstore", "the pair forms")
+        if not ok:
+            return
+        if not r0.wait_for("ARMED", 10):
+            result(False, "ownstore", "rank 0's failing store never armed")
+            return
+        time.sleep(1.0)                                # four failed beats in, well inside the 2 s timeout
+        alive = r0.p.poll() is None
+        result(alive, "ownstore", "a failed call on rank 0's own store does not end its watch at once")
+        code = r0.exited_within(6)
+        result(code == 1 and "rank 0's own store has not answered" in r0.text() and ENDED in r0.text(), "ownstore",
+               f"rank 0 ends with code 1 after the timeout of failed calls (got {code}; {r0.tail()})")
+        result("keeps watching" in r0.text(), "ownstore", "rank 0 says it kept watching through the failures")
+    finally:
+        r0.kill(); r1.kill()
+
+
+def case_nomark(tmp: Path) -> None:
+    r0, r1, ok = pair(free_port(), "2", tmp, "nomark", r0_role="serve-nomark")
+    try:
+        result(ok, "nomark", "the pair forms")
+        if not ok:
+            return
+        r0.stop()
+        code = r0.exited_within(30)
+        result(code == 0 and "HOOK DONE" in r0.text() and "STOPPED" in r0.text()
+               and "announcing the clean stop failed" in r0.text(), "nomark",
+               f"a mark the store refuses does not skip the shutdown hook (got {code}; {r0.tail()})")
+    finally:
+        r0.kill(); r1.kill()
+
+
 def case_setting(tmp: Path) -> None:
     from tensorfold.cuda import comm
 
@@ -436,7 +499,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         for case in (case_gone, case_back, case_idle, case_headloss, case_orphan, case_stop, case_cadence,
-                     case_stopkill, case_setting):
+                     case_stopkill, case_ownstore, case_nomark, case_setting):
             case(tmp)
     print(f"{'FAIL' if FAILS else 'PASS'}: {len(FAILS)} failed check(s){': ' + ', '.join(sorted(set(FAILS))) if FAILS else ''}",
           flush=True)
