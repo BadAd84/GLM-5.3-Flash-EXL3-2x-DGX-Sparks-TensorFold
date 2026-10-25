@@ -215,7 +215,6 @@ Every change to this recipe, newest first. Each release names the image it serve
   keeps its figure, and the GLM family reads `MemAvailable` nowhere else. `start.sh`'s own "memory available" check
   (and its warning below ~110 GiB) counts the same excess. Cold first start of a new image, TP=2: 94.58 GiB "within"
   on rank 0 (rank 1 95.20) against 89.44 with nothing counted; a warm restart 94.86. CPU check on synthetic zoneinfo / meminfo files, admit() included: `tools/parked_pages_check.py`.
->>>>>>> origin/main
 - **A prompt that fills beside other replies, ~10-14% sooner** (`FILL_ROWS`, by [BadAd84](https://github.com/BadAd84)):
   while other requests decode, a new prompt filled in 1,024-row chunks (TensorFold's `TF_GLM_FILL_ROWS` default),
   half the 2,048-row prompt chunk whose buffers the engine keeps anyway. `scripts/config.sh` now sets 2,048 (at

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Patch 0117's checks (cache_salt: vLLM's per-request prefix-cache isolation, which RigMark's cold
+"""Patch 0130's checks (cache_salt: vLLM's per-request prefix-cache isolation, which RigMark's cold
 prefill relies on), CPU only, self-contained (the fork-point check's harness inlined: its upstream file is not merged).
 
 The parallel engine through two real ``MultiDecoder``s (rank 1 applying rank 0's messages in-process, the model
 stubbed), the serial engine through two real ``GlmEngine.generate`` / ``follow_one`` with the model stubbed the same
 way, and the HTTP side's ``GlmApp`` field check and request hand-off:
 
-  1. app: ``cache_salt`` absent / null passes, a non-empty string passes, "" / 5 / [] / {} are refused by
-     ``_check_fields`` (before a stream opens), and ``run`` hands the salt (or None) to ``engine.request``.
+  1. app: ``cache_salt`` absent / null passes, a non-empty string of at most 256 characters passes, "" / 5 / [] / {}
+     and a string longer than 256 are refused by ``_check_fields`` (before a stream opens), and ``run`` hands the
+     salt (or None) to ``engine.request``.
   2. parallel: a prompt kept unsalted resumes unsalted (the control), not under a salt; kept under salt A it resumes
      under A only (not B, not unsalted); the identical prompt under a fresh salt prefills from 0 (RigMark's cold).
      Both ranks keep the same states, rank 1's salted ones marked "" (salted, salt unknown there).
@@ -24,6 +25,9 @@ way, and the HTTP side's ``GlmApp`` field check and request hand-off:
      resumes as before, and the other way round; two salts of the same ids still replace each other (rank 1 knows
      only that a state is salted); both ranks keep the same states in the same order, rank 1's serial resume taking
      the state as salted as rank 0's.
+  8. routes: a /v1/responses request's ``cache_salt`` reaches the chat completion that runs it (and a malformed one
+     is still refused by the app's check), and /v1/messages - whose protocol has no salt - refuses it instead of
+     running the request silently unsalted.
 
 Prints ok / FAIL lines and "all passed"; exit 1 when a check fails."""
 import sys as _sys  # an uncaught raise prints a FAIL line (a kill needs one)
@@ -43,6 +47,8 @@ import torch  # noqa: E402
 import tensorfold.families.glm5_next.cuda.decode as D  # noqa: E402
 import tensorfold.families.glm5_next.cuda.engine as ENG  # noqa: E402
 import tensorfold.families.glm5_next.cuda.forward as F  # noqa: E402
+from tensorfold.server.errors import RequestError  # noqa: E402
+from tensorfold.server import anthropic_translate, responses_translate  # noqa: E402
 import tensorfold.families.glm5_next.cuda.multi as M  # noqa: E402
 from tensorfold.cuda.server import App  # noqa: E402
 from tensorfold.cuda.streams import Stream  # noqa: E402
@@ -167,6 +173,7 @@ def app_side():
     app = object.__new__(GlmApp)
     app.engine = eng
     for body, ok in (({}, True), ({"cache_salt": None}, True), ({"cache_salt": "s" * 43}, True),
+                     ({"cache_salt": "s" * 256}, True), ({"cache_salt": "s" * 257}, False),
                      ({"cache_salt": ""}, False), ({"cache_salt": 5}, False), ({"cache_salt": []}, False),
                      ({"cache_salt": {}}, False)):
         problem = app._check_fields(dict(body, prompt=[1, 2, 3]))
@@ -184,6 +191,38 @@ def app_side():
               f"{eng.request.cache_salt!r})", first == "xyz" and eng.request.cache_salt is None)
     finally:
         App.run = saved
+
+
+# -- 8: the translated routes --------------------------------------------------------------------------------------
+class _Store:                                   # the Responses translator's store, as test_responses_include's
+    def conversation(self, _id):
+        return []
+
+
+def routes():
+    body = {"model": "x", "store": False,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Say OK."}]}]}
+    chat = responses_translate.translate({**body, "cache_salt": "A"}, _Store()).chat
+    check(f"routes: a Responses request's salt reaches its chat completion ({chat.get('cache_salt')!r})",
+          chat.get("cache_salt") == "A")
+    chat = responses_translate.translate({**body, "cache_salt": 5}, _Store()).chat     # malformed: refused by the app
+    app = object.__new__(GlmApp)
+    app.engine = NS(request=NS())
+    check(f"routes: a Responses request's malformed salt is refused by the app, not the translator "
+          f"({app._check_fields(dict(chat, prompt=[1, 2, 3]))!r})",
+          "cache_salt" in str(app._check_fields(dict(chat, prompt=[1, 2, 3]))))
+    check("routes: a Responses request without a salt carries none",
+          "cache_salt" not in responses_translate.translate(body, _Store()).chat)
+    messages = {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "Say OK."}]}
+    try:
+        anthropic_translate.translate({**messages, "cache_salt": "A"})
+        refused = None
+    except RequestError as exc:
+        refused = str(exc)
+    check(f"routes: /v1/messages refuses a salt instead of running it unsalted ({refused!r})",
+          refused is not None and "cache_salt" in refused)
+    check("routes: /v1/messages without a salt translates as before",
+          "cache_salt" not in anthropic_translate.translate(messages))
 
 
 # -- the parallel engine --------------------------------------------------------------------------------------------
@@ -287,7 +326,8 @@ class TierRec:
 def parallel_tier():
     if importlib.util.find_spec("tensorfold.families.glm5_next.cuda.kvtier") is None:
         # main has no NVMe tier (kvtier.py, PR #118's patch 0109); CACHE_SALT_TIER=1 makes this a failure
-        check("tier: this tree has an NVMe tier (kvtier.py)", os.environ.get("CACHE_SALT_TIER") != "1")
+        check("tier: no NVMe tier in this tree (main; CACHE_SALT_TIER makes its absence a failure)",
+              os.environ.get("CACHE_SALT_TIER") != "1")
         print("skip tier: no NVMe tier in this tree")
         return
     r0, r1 = ranks()
@@ -490,8 +530,8 @@ def serial():
 
 
 def main() -> int:
-    for part in (app_side, parallel_isolation, parallel_same_ids, parallel_tier, parallel_spill, parallel_shared,
-                 serial):
+    for part in (app_side, routes, parallel_isolation, parallel_same_ids, parallel_tier, parallel_spill,
+                 parallel_shared, serial):
         try:
             part()
         except Exception as exc:                 # a part that raises fails the check; the rest still run
