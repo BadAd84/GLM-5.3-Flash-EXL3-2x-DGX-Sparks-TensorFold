@@ -2421,7 +2421,7 @@ index af9769e..ce427a1 100644
              else:
                  try:
                      left = until - time.monotonic() if until is not None else 0.0
-@@ -1895,17 +2405,33 @@ class GlmScheduler(Scheduler):
+@@ -1895,17 +2405,34 @@ class GlmScheduler(Scheduler):
              if self._cancel_item(item):
                  continue
              stream, box = item
@@ -2442,6 +2442,7 @@ index af9769e..ce427a1 100644
 +                if read is not None:
 +                    self.loading.append((read, item))
 +                    continue
++                self.staged.discard(id(stream))      # (nothing read, e.g. no room for it yet: looked for again if it waits)
              self.boxes[id(stream)] = box
              try:
                  self.decoder.admit(stream)
@@ -2455,7 +2456,7 @@ index af9769e..ce427a1 100644
                  self.boxes.pop(id(stream)).put(("error", exc))
                  continue
              if stream.done:
-@@ -1912,10 +2439,20 @@ class GlmScheduler(Scheduler):
+@@ -1912,10 +2440,20 @@ class GlmScheduler(Scheduler):
                  done.append(stream)
          return done
  
@@ -2477,7 +2478,7 @@ index af9769e..ce427a1 100644
              return
          live = list(self.decoder.streams.values())
          stream = next((s for s in reversed(live) if s.background and not s.done and s.constraint is None
-@@ -1956,7 +2493,10 @@ class GlmScheduler(Scheduler):
+@@ -1956,7 +2494,10 @@ class GlmScheduler(Scheduler):
      def _iteration(self) -> None:
          self._cancel_waiting()
          self._yield()
