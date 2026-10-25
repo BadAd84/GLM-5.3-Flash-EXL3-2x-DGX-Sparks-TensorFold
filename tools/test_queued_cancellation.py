@@ -95,6 +95,7 @@ def main():
         obj.waiting, obj.held, obj.boxes, obj.yields, obj.gather_s = ns["Waiting"](), None, {}, 0, 0
         # patch 0088's spill tier (off): its scheduler state
         obj.flushing, obj.flush_lock, obj.loading, obj.ready, obj.staged = None, threading.Lock(), [], [], set()
+        obj.prefix = []
         obj.max_in_system = None              # patch 0082's admission cap: off
         for _ in range(holders):
             stream = Stream([1], 100)
@@ -179,6 +180,9 @@ def main():
                 return None
             self.reads += 1
             return object()
+
+        def step_loads(self):
+            pass                                         # (0128's block reads move their rows between rounds)
 
         def load_ready(self, handle):
             return True
