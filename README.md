@@ -299,6 +299,21 @@ TensorFold's budget on each Spark is `MemAvailable` at start minus a host reserv
 TensorFold's own default is a tenth of RAM). The server uses about 10 GiB beyond its own estimate at its peak, so the
 reserve also sets the lowest free memory.
 
+On a long multi-agent session `MemAvailable` falls in the first half hour and stays down when the agents disconnect
+([issue #197](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/197)). The kept prompt
+states (up to `TF_GLM_CACHE_ENTRIES`, 32) own device memory outside the KV pool (recurrent state, conv windows, DFlash2
+window copies), and nothing hands it back by itself; a restart is the only full reset. The default
+`TF_GLM_KEPT_BYTES_GIB=0` puts no byte cap on them. Setting it bounds the `kept_bytes` that `/health` shows: past the
+cap the least valuable states are dropped on both ranks (not written to the spill tier; at least one state is always
+kept) and the allocator's cached blocks go back to the driver. One soak by
+[SvangenStudios](https://github.com/SvangenStudios) (v1.10, two Sparks, `PARALLEL=2`, three agents growing
+conversations to 400K tokens, one start per setting, first hour): with `TF_GLM_KEPT_BYTES_GIB=1` `kept_bytes` was
+1.0 GiB (2.8 GiB uncapped) and `MemAvailable` was about 4 GiB higher on both Sparks (head 7.6-8.4 against 3.7-4.9 GiB,
+worker 9.4-9.7 against 5.4-6.9 GiB), with the same turn time and cache reuse on that workload. The price is a full
+prefill when a dropped conversation returns, so a workload that goes back to old conversations wants a larger cap (the
+author of the option runs 4). The cap does not shrink the pool or the prefill scratch; `MEMORY_RESERVE_GIB` is the other
+lever.
+
 TensorFold reads `MemAvailable` once, when it starts. The image copy in `prepare.sh` (`docker save` on the head,
 `docker load` on the worker) frees tens of GiB of page cache at once, and the kernel parks 5-9 GiB of it on its per-CPU
 free lists (the `count:` lines under `pagesets` in `/proc/zoneinfo`), in neither `MemFree` nor `MemAvailable`; it comes
