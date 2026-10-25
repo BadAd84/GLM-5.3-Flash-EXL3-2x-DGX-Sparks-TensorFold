@@ -31,7 +31,7 @@ def decoder_type(root):
                 calls.append(method.name)
     assert sorted(writes) == ['__init__', '_break'], writes
     assert sorted(calls) == ['admit', 'complete_load', 'drop', 'round'], calls
-    names = {'_break', '_check', 'round', 'drop', 'complete_load'}
+    names = {'_break', '_check', '_pump', 'round', 'drop', 'complete_load'}
     methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(methods) == len(names)
     for n in methods:
@@ -90,7 +90,7 @@ def main():
         d.lanes = {}
         d.partial = None
         try:
-            getattr(d, path)(SimpleNamespace(lid=1, done=False)) if path == 'complete_load' else getattr(d, path)()
+            getattr(d, path)(SimpleNamespace(lid=1, done=False, lj=None)) if path == 'complete_load' else getattr(d, path)()
         except RuntimeError:
             pass
         assert d.broken is not None, path

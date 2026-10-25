@@ -79,8 +79,8 @@ GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/miaai-lab/glm-5.3-flash-exl3-2x-dgx-sparks-ten
 # cannot) while patches/*.patch and IMAGE_EXTRAS still hash to IMAGE_TAG's hash. Other patches pull
 # $GHCR_IMAGE:<TF_VERSION>-<hash> when one is published, else build locally. scripts/publish-image.sh prints both.
 # The same image serves two and three Sparks.
-IMAGE_TAG="${IMAGE_TAG:-v0.6.0-7e5bd69b1266}"
-IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:4263622942a7b0b149cd6b963375e1418bd206b4ab6f76c3df299256a866e50e}"
+IMAGE_TAG="${IMAGE_TAG:-v0.6.0-789e8f3bdfa2}"
+IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:99fe7496d7002fd8f2ca3b1beb0aa07513835cd09989ca657b65875d60f69956}"
 # the registry reference prepare.sh pulls for these patches: the pinned digest, or the hash's tag
 prebuilt_image() {
   local tag="${TF_VERSION}-$(image_hash)"
@@ -439,17 +439,37 @@ prepared_state() {
   echo "$line"
 }
 
-# Spill tier (patch 0088-glm-spill-tier, off by default): kept prompt states go to local disk on each Spark and come
-# back instead of a new prefill, also after a clean restart. SPILL_GIB: the cap per Spark (0: off). SPILL_DIR: the same
-# absolute path on every Spark (mounted at /spill; files owned by your user). SPILL_HIGHWATER: past this fraction of
-# the KV pool, the kept prompts eviction would take next are written in the background (1.0: only when evicted).
-# A clean stop writes what is kept within SPILL_FLUSH_S seconds; STOP_TIMEOUT gives it the time. README: Spill tier.
+# Spill tier (patches 0088-glm-spill-tier and 0128-glm-spill-blocks, off by default): kept prompt states go to local
+# disk on each Spark when they are kept (PARALLEL above 1) and come back instead of a new prefill, also after a
+# restart or a crash. SPILL_GIB: the cap per Spark (0: off). SPILL_DIR: the same absolute path on every Spark (mounted
+# at /spill; files owned by your user). SPILL_QUOTA: the share of SPILL_GIB one conversation may hold before its own
+# old turns and forks go first (0: none). SPILL_TURNS: the newest states kept on a conversation's path; older turns
+# go as each one is written (each keeps a ~91 MB small part; 2 for heavy agent loops or a small disk, 8+ for chats with
+# deep edits, 0: every turn kept until room is needed). SPILL_RELEASE_MIB: the most MiB of rows copied to host memory
+# while they wait to be written (rows freed or overwritten before their write: on a GB10 that memory is the pool's and
+# the reserve's); unset, an eighth of MEMORY_RESERVE_GIB (1.8 GiB at 14.5); a state past it is not stored. One engine a
+# SPILL_DIR on each Spark: a second one finds it locked and runs without the tier.
+# SPILL_HIGHWATER: no longer used (states are written when kept). A clean stop writes what still waits within
+# SPILL_FLUSH_S seconds; STOP_TIMEOUT gives it the time. README: Spill tier.
 SPILL_GIB="${SPILL_GIB:-0}"
 SPILL_DIR="${SPILL_DIR:-$HOME/.cache/tensorfold-spill}"
 SPILL_HIGHWATER="${SPILL_HIGHWATER:-0.70}"
 SPILL_MIN_TOKENS="${SPILL_MIN_TOKENS:-8192}"
 SPILL_MIN_FREE_GIB="${SPILL_MIN_FREE_GIB:-50}"
 SPILL_FLUSH_S="${SPILL_FLUSH_S:-60}"
+# (each also taken from its TF_GLM_ name when only that is set: exporting the TF_GLM_ name alone was overwritten)
+SPILL_QUOTA="${SPILL_QUOTA:-${TF_GLM_SPILL_QUOTA:-0}}"
+export TF_GLM_SPILL_QUOTA="$SPILL_QUOTA"
+SPILL_TURNS="${SPILL_TURNS:-${TF_GLM_SPILL_TURNS:-4}}"
+export TF_GLM_SPILL_TURNS="$SPILL_TURNS"
+SPILL_RELEASE_MIB="${SPILL_RELEASE_MIB:-${TF_GLM_SPILL_RELEASE_MIB:-}}"
+[[ -z "$SPILL_RELEASE_MIB" ]] || export TF_GLM_SPILL_RELEASE_MIB="$SPILL_RELEASE_MIB"
+# A request whose prompt starts with what another request is still prefilling (a system prompt several agents share)
+# waits for that state instead of prefilling it beside it (patch 0128): six agents at once on a fresh 12k-token system
+# prompt answered in 15 s instead of 47 s. Same replies. Off by default: it changes admission (with SPILL_GIB=0 too).
+# PREFIX_WAIT=1 turns it on. README: A system prompt prefilled once.
+PREFIX_WAIT="${PREFIX_WAIT:-0}"
+export TF_GLM_PREFIX_WAIT="$PREFIX_WAIT"
 if [[ "$SPILL_GIB" != 0 ]]; then
   STOP_TIMEOUT="${STOP_TIMEOUT:-$(( ${SPILL_FLUSH_S%.*} + 30 ))}"
 fi

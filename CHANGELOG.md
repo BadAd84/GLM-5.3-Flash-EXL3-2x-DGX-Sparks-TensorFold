@@ -5,6 +5,43 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **A request held for room no longer re-reads its stored prompt every round** (patch `0088-glm-spill-tier`, PR #210
+  by [nanashi66](https://github.com/nanashi66)): `GlmScheduler._admit` forgot a request's "its stored prompt was looked
+  for" mark before `admit`, so a request `NoRoom` held started the NVMe read of its state again in every retry round
+  (6 reads in 6 rounds in the check, 1 now). The mark now goes after `admit` succeeds or the request fails. Added when
+  taking it: a request whose first `prestage` read nothing (no room for the read yet) drops the mark, so the prompt
+  is looked for again and read once there is room (without that it would have prefilled from scratch). CPU test:
+  `tools/test_queued_cancellation.py` (two cases; fails on the unpatched source).
+- **KV sharding** (patch `0129-glm-kv-shard`, `TF_GLM_KV_SHARD=1`, off by default, by
+  Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)): each
+  conversation's MLA latent cache is stored once, on the Spark that owns it,
+  instead of on every Spark (tensor parallelism splits the heads, but every head reads the whole latent). The owner
+  computes the decode attention of its rows; a prompt chunk on the other Sparks gets only the history rows its sparse
+  attention selects, or borrows free rows and attends locally. Two Sparks, `PARALLEL=8`: the pool holds 1.87x the tokens
+  (1.51M -> 2.83M; 1.85M -> 3.47M with `DISPLAY_KV_MIB=1792`), every reply byte-equal to the unsharded engine's, decode
+  within 1%, prompts within noise when rows can be borrowed and +1.8-3.5% when they are sent. A borrowed row is pinned
+  while its prompt fills (a compaction moving it gave wrong replies under concurrent load; found in review, fixed, and
+  a forced-compaction run on two Sparks is byte-equal). A cache hit whose part has no room no longer drops the cache
+  or evicts kept conversations while another part has room: its rows are carried there (`TF_GLM_KV_SHARD_CARRY`,
+  on; only when it saves a recompute, an eviction or a pause, never to even out the parts). The same shard code serves
+  the tp4 branch (own-row front, microbatching, a carry relayed over a switchless ring's neighbour links); two Sparks
+  and four (tp4, on a ring) tested, three untested. The staging buffers a prompt's history fetch keeps (`shard._grown`) are outside the start-up
+  estimate. Builds on `0128` and `0119` (renumbered from `0118`, which #216 uses). CPU checks: `tools/kv_shard_check.py`, `tools/kv_shard_mutants.sh`.
+
+- **A rewound conversation keeps its id** (patch `0119-glm-chat-continued`, by
+  Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)): patch
+  `0089` gave a stream a new conversation id unless it resumed from one of that conversation's own turn states, so a
+  client rewinding before the kept turns (issue #104, @danielbanu), a state read back from the spill tier, or dropped
+  states split one session into several ids, and `TF_GLM_KEEP_PER_CHAT` counted each piece on its own: one session
+  held more states than the quota. Now the stream joins the conversation whose own kept state its prompt repeats past
+  that conversation's first prompt and the first 32 tokens of the reply to it. On two Sparks (PARALLEL=8,
+  `TF_GLM_KEEP_PER_CHAT=2`, `TF_GLM_CACHE_ENTRIES=16`), a ~110k-token session rewinding three rounds every fifth of 16
+  while six chats fill the cache: before, its states went under 3 ids; after, 1, holding 2 states as asked; replies
+  the same drafted and with `draft:false`. New counters `chats_continued`, `chats_continued_prefill_tokens` (`/health`,
+  `/metrics`) and a rank-0 log line for one prefilling 4096 tokens or more, with where the prompt left the kept state
+  and what it resumed from. Two sessions with the same opening message and the same first reply (temperature 0)
+  cannot be told apart by this match and share an id. CPU check: `tools/chat_continued_check.py` (fails on the
+  unpatched engine; also runs `_admitted` itself and the `chat_roots` pruning).
 - **`prepare.sh` warns when a node's NVIDIA CDI device cannot be confirmed** (by
   [SvangenStudios](https://github.com/SvangenStudios), [pull request #207](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/207),
   issue #150): without the host's CDI spec, a `systemctl daemon-reload` can remove the GPU from a running container's
@@ -285,6 +322,53 @@ Every change to this recipe, newest first. Each release names the image it serve
   connection) before answering; a request without one reads nothing. CPU test: `tools/test_get_bodies.py` (fails on
   the unpatched source).
 - **Broken concurrent GLM engine is visible** (patch `0118-glm-broken-health-exit`): `/health` reports `ok: false` and its first error in `broken`; `/metrics` exposes `tensorfold_health:ok`. Opt-in `TF_GLM_EXIT_ON_BROKEN=1` logs the cause and exits with code 1 as soon as the broken state latches. The existing stall watchdog is unchanged. The cause shown in `/health` is cut at 200 characters. CPU check: `tools/test_broken_health_exit.py`.
+- **Spill tier, blocks** (patch `0128-glm-spill-blocks`; with `PARALLEL` above 1 and `SPILL_GIB` set; off by default):
+  every kept prompt state is written to local disk when it is kept, in blocks of 2,048 tokens that later turns and forks
+  of the same conversation share, so a conversation resumes from disk after an eviction, a clean restart, a `kill -9` or
+  a watchdog restart, and a turn writes only its new rows (a 10.4k-token turn of a 50k conversation: 68 MiB, not the
+  whole state). Each conversation keeps its newest `SPILL_TURNS` (4) states, older turns trimmed as each one is written
+  (each held a ~91 MB small part; the rows stay, the newest turn names them), and small parts go to disk with O_DIRECT,
+  so the page cache keeps no copy. Room goes by conversation: old turns beyond `SPILL_TURNS`, abandoned forks, whole
+  conversations least recently used, shared system prompts last; `SPILL_QUOTA` caps one conversation's share (#122,
+  reported by [xiepengqi](https://github.com/xiepengqi): one conversation's per-turn states filled 128 GiB in 30 minutes
+  and pushed the others out). The free-disk floor makes room in the same order. Blocks with equal bytes are linked, not
+  written twice. Rank 0 asks every Spark before a read (HAS). The block layout, the lineage, writing at keep through a
+  pinned ring and the fsync order are those of
+  [PR #118](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/118) by
+  [BadAd84](https://github.com/BadAd84), brought into the spill tier so there is one tier and one set of settings. The
+  one-stream engine (`PARALLEL=1`) keeps its file a state. `SPILL_HIGHWATER` no longer changes anything.
+  A restore reads ahead on 8 threads into pinned slots (`TF_GLM_SPILL_READ_BLOCKS`, 16) and the engine copies the
+  blocks read between rounds (`TF_GLM_SPILL_LOAD_MS`, 40 ms, one budget for every restore in flight, each first in
+  turn; beside decoding streams a restore ends only once those copies are done, rather than its end copying the
+  read-ahead in one pause), as #118 does: issued from the reader's own thread, each
+  copy waited on the decode loop (~0.25 ms a call against ~9 us idle), so a 260k-token restore beside a decoding stream
+  took 1.0-1.3 s on two Sparks and 8.6-12.7 s on three (measured by [BadAd84](https://github.com/BadAd84)); now
+  0.54-0.61 s with 32 blocks read ahead (idle 0.40-0.46 s), the same replies. The read-ahead's first blocks go in the
+  two 64 MiB read buffers pinned at start (ten blocks on two Sparks); the rest is pinned before the pool is sized, in
+  power-of-two pieces, so that comes out of the pool, not the margin it keeps (the default 16 blocks: ~14k tokens at
+  `PARALLEL=4`; 9 costs the pool nothing). The write ring's size is `TF_GLM_SPILL_STAGE_MIB` (256 MiB). A restore
+  whose read fails on one Spark (a damaged or missing block) ends on every Spark and the
+  prompt is computed again: a Spark with more blocks left than read slots (above ~65k tokens) waited for ever for the
+  slots its own copies held (a ~100k-token conversation with damaged blocks on two Sparks: the request hung until the
+  client gave up after 15 minutes; now answered in 50 s, its prompt recomputed). CPU check: `hang` in
+  `tools/spill_blocks_check.py`. Rows copied to host memory before they go (`release`) have their own cap,
+  `SPILL_RELEASE_MIB` (an eighth of `MEMORY_RESERVE_GIB` by default, not the 16 GiB write backlog); a state past it is
+  not stored. One engine a `SPILL_DIR` (a flock on `.lock-rank<N>`: a second engine runs without the tier and says
+  why), and temporary files opened `O_EXCL | O_NOFOLLOW`.
+- **A system prompt prefilled once for every agent** (patch `0128`, `PREFIX_WAIT=1`, off by default: it changes
+  admission also with `SPILL_GIB=0`): a request whose prompt starts
+  with what another request is still prefilling waits for that state, apart from the queue, then resumes from it. Six
+  agents at once on a fresh 12k-token system prompt: all answered in 14.7-15.0 s instead of 45.7-47.0 s, the slowest
+  first token 13.5-13.8 s instead of 45.0-46.2 s, the same replies. Counted in `/health` (`prefix_waits`,
+  `prefix_wait_tokens`) and `/metrics` (`prefix_waits_total`, `prefix_wait_tokens_total`).
+- `tools/kept_state_check.py`: the spill tier writes a state when it is kept, not when it is dropped.
+  `tools/test_queued_cancellation.py`: the scheduler's prefix-wait list. `tools/spill_blocks_check.py` (CPU): the
+  block store and its hooks in `multi.py` (a read only reads; the engine copies, rank 1 as far as LOADPART says), the
+  room (the files each eviction step deletes, the eviction order, a point being read, blocks a new state names), old
+  turns trimmed (`SPILL_TURNS`), the quota, the floor, a restart with torn, orphaned and foreign files, older builds
+  pruned, the release cap, temporary files and the folder lock, and the prefix wait (off by default; what it waits
+  for, its release, the scheduler holding a request apart); `tools/spill_blocks_mutants.sh` runs it on faithful
+  mutants of each fix. Its whole-run watchdog is 900 s by default (`TEST_TIMEOUT_S`).
 
 ## v1.10 (2026-10-08): the effort line at the tail (opt-in), a kept-state share, and a checked second rail
 
