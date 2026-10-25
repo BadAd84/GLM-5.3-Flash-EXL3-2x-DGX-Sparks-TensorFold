@@ -335,6 +335,68 @@ with that window and says so (free memory on both Sparks for the full one). Othe
 | `KV=bf16 DRAFTER=mtp` | 524,288 | one request at a time |
 | `CONTEXT=0` | the largest that fits | no memory is left to keep other conversations' prompts |
 
+### KV sharding (optional)
+
+`TF_GLM_KV_SHARD=1` (patch `0129`, `PARALLEL` above 1) stores each conversation's latent cache once instead of on
+every Spark. Tensor parallelism splits the attention heads, but every head reads the whole MLA latent, so each Spark
+held a full copy: 11 DSA layers x (528 bytes of fp8 latent + 36 of pooled keys) = 6,204 bytes a token a Spark. With
+the shard the pool is split in parts, one a Spark; a conversation lives in one part, and only that Spark (its owner)
+keeps its latents, the pooled keys staying on every Spark: 3,300 bytes a token at two Sparks, so the same memory holds
+1.87x the tokens (computed: 2.66x at three, untested there). The same shard code serves the tp4 branch (four Sparks):
+there its own-row prompt front and microbatching run with it, and on a switchless ring a carry is relayed over the
+neighbour links; four Sparks on a ring measured 3.4x the pool with byte-equal replies (#152). On this branch a carry
+always goes straight from owner to owner.
+
+- **Decode**: the queries are all-gathered and each row's owner computes all 64 heads over its latents, sending the
+  other Sparks their heads' outputs (64 heads at once give the same bits as 32 + 32).
+- **Prompts**: the other Sparks keep their own heads; the owner sends only the history rows a chunk's sparse attention
+  selects (90% of the history under 50k tokens, ~43% at 250k), deduplicated and renumbered with marks and prefix sums.
+  When the other parts have free rows, a new prompt borrows them instead: every Spark writes its own copy while the
+  prompt fills and attends locally, and the rows go back at the first reply token, at the end, or as soon as anything
+  else needs them (a borrow never evicts a kept prompt).
+- **Pool**: evictions happen in one part only, the one whose newest needed eviction is the oldest; a new conversation
+  goes to the part with fewer live streams. The spill tier and the display reservation work with it (each Spark stores
+  what it holds; a restore goes back into its part). Not with `TF_GLM_MULTI_LONE`.
+- **Carry** (`TF_GLM_KV_SHARD_CARRY`, on; `0` turns it off): a resumed conversation, or a request starting from a
+  kept shared system prompt, uses rows its own part holds, so it lands in that part. With agents resuming all the time
+  one part fills while the other has room. When that would cost something, the cached rows go to the other part
+  instead (the owner sends the latents, ~5.8 KB a token over the Sparks' link; every Spark copies its pooled keys):
+  - *the cache would be dropped*: no room beside the kept rows, so the whole prompt was computed again (~93 s at 205k
+    tokens), now a carry of ~70 ms;
+  - *its part would evict kept conversations* to fit it, while the other part has the room free (with room to grow);
+  - *a live stream cannot grow* in its part and would pause: it moves whole, or a smaller stream of its part moves so
+    it grows in place; the target must keep room for its own streams, a moved stream stays put for 256 rounds and
+    never goes straight back; if no move is safe, it pauses as before.
+
+  Never to even out the parts (that would buy ~0.7% decode): when the request fits where it is without evicting,
+  nothing moves. Same replies (rows copied byte for byte). Nothing changes until a carry is due (one host-side check a
+  cache hit); a carry pauses every stream once for its transfer (two Sparks: 14-17 GB/s, at most 69 ms in a test of
+  124 carries, 3.38M tokens). Spill blocks of a sharded run name their part (a carried conversation's later blocks
+  are written by another owner); stores from before still restore.
+- **Refused at start**, with the reason: `TF_GLM_MULTI_VERIFY=serial`, and a part under 131,072 tokens or a quarter
+  of the window. A part a little short of the window (a first start of a new image) caps a request at what a part
+  holds, logged once at start.
+- **Outside the start-up estimate**: the staging buffers a prompt's history fetch keeps (`shard._grown`), each the
+  next power of two of the largest fetch so far, kept once grown: on a Spark receiving another Spark's rows, the rows
+  received (528 bytes a row with the FP8 KV cache, 1,024 with bf16: 0.5-1 GiB once a ~1M-token prompt has sent its
+  whole history), and on the owner its send piece (at most 64 MiB). They grow with the longest prompt served, so the
+  memory reserve, not the pool, has to cover them.
+
+Measured on two Sparks (`PARALLEL=8`, default reserve), every reply byte-equal to the unsharded engine's (concurrent
+streams, 60k to ~1M-token prompts, real text, multi-turn, borrows taken back mid-prompt, spill restores, prefix waits):
+
+| | unsharded | sharded |
+|---|---|---|
+| Pool | 1,505,280-1,531,904 tokens | 2,813,952-2,842,624 |
+| Pool with `DISPLAY_KV_MIB=1792` | 1,849,344 | 3,465,216 |
+| Decode, 8 streams | 103.1 tok/s | 102.4 (101.7 with every stream on one Spark) |
+| 205k-token prompt (real text) | 113.4 s | 113.7 borrowing rows; 116.0 sending them |
+| ~1M-token prompt, sending rows | 900.9 s | 932.0 |
+| Lowest free memory, 1M prompt + 7 decoding | rank 0 12.1 GiB | 10.6 GiB (rank 1 unchanged) |
+
+Open items being measured: the ~1 GiB of extra worst-case memory on the owner, the decode stalls beside two restores
+at once, and TP3 (the code handles N Sparks; a part a Spark, the prompt rows broadcast from the owner).
+
 ## Spill tier (optional)
 
 The KV pool keeps a few conversations' prompt states (`TF_GLM_CACHE_ENTRIES`, and what the pool holds); one that
@@ -645,6 +707,7 @@ sets a value wins: the environment, then `scripts/local.sh`, then `.env`, then t
 | `TF_GLM_KEPT_BYTES_GIB` | `0` (no cap) | a byte budget for the kept states together (patch `0089`, by Thomas Wade, [ThomasWadeZ](https://github.com/ThomasWadeZ), PR #65): the device memory they own outside the pool (recurrent state, DFlash2 window copies: hundreds of MB each with long contexts); past it states are dropped in the entry cap's order (not written to the spill tier) and freed blocks go back to the driver. The author runs `4`; `kept_bytes` / `kept_bytes_cap` in `/health` |
 | `TF_GLM_SPILL_READ_BLOCKS` | `16` | the blocks restores read ahead into pinned host memory (12.1 MiB each on two Sparks; printed at start). The first ten go in the two 64 MiB read buffers `spill.preallocate` pins at start; the rest is pinned before the pool is sized, in power-of-two pieces, and the pool pays for those. Measured on two Sparks at `PARALLEL=4` (the next turn of a 260k-token conversation restored beside a decoding stream: pool tokens given up, the read, the whole turn): 9 blocks 0, 1.33 s, 7.28 s; 16 14,336, 0.85 s, 6.80 s; 21 24,576, 0.67 s, 6.59 s; 32 49,152, 0.47 s, 6.48 s. 9 is the free setting; above 16 each block buys about half as much per pool token or less ([Spill tier](#spill-tier-optional)) |
 | `TF_GLM_SPILL_STAGE_MIB` | `256` | the pinned ring writes go through, in MiB. Writes come at prefill's pace (~14 MB/s a Spark), far below the disk's: 64 to 512 MiB measured the same (four 30k-token prompts beside a decoding stream: every state on disk within 0.5 s, the stream's pace unchanged) |
+| `TF_GLM_KV_SHARD` | `0` (off) | `1`: each conversation's latent cache stored once, on its owner Spark, instead of on every Spark: 1.87x the pool's tokens at two Sparks, same replies (patch `0129`, `PARALLEL` above 1, not with `TF_GLM_MULTI_LONE`; [KV sharding](#kv-sharding-optional-in-testing)). Set the same on every Spark |
 | `TF_GLM_SPILL_LOAD_MS` | `40` | the longest the restores' copies may pause the other requests between two decode rounds (every restore in flight shares it, each first in turn; an idle server copies at once). On GB10 the copy, within unified memory, outruns the NVMe reads feeding it, so the limit is rarely reached: 10 to 160 ms gave the same restore times (a 260k-token conversation's next turn beside a decoding stream: 1.7-1.8 s; two at once 2.1-2.9 s) and the same stalls (at most 50-58 ms for one, 67-100 for two: the resumed turns' own prompt passes, not the copies). It matters when blocks come faster than they are copied (a state still in the page cache): lower means shorter pauses and slower restores |
 | `TF_GLM_KEEP_PER_CHAT` | `0` (no limit) | at most this many of one conversation's own turn-boundary kept states (patch `0089`, PR #65); shared-prefix and mid-prefill states do not count, the older turns are dropped without a spill. A conversation keeps its id when a client rewinds before its kept turns or it resumes from disk (patch `0119`), so the quota counts it once; `chats_continued` in `/health` counts those streams. The author runs `2`; `kept_mix` in `/health` shows each conversation's count |
 | `TF_GLM_MULTI_WATCHDOG_S` / `TF_GLM_MULTI_WATCHDOG_EXIT` | `300` / `0` | a rank stuck this many seconds in one step prints every thread's stack to its log (`/health`'s `iteration_s` shows how long the current step has run); `EXIT=1`: the server then exits (code 1) instead of waiting, so a supervisor can restart it. Both ranks also check that they received the same message each step, and stop with an error naming it if not |
@@ -760,6 +823,7 @@ applied with `patch -p0` in filename order); `start.sh` rebuilds or re-pulls the
 | Weights | `0002-glm-dense-fp8`, `0005-glm-dense-q4` | the checkpoint's BF16 dense weights in FP8, or 4-bit with MSE-searched ranges (`DENSE`) | q4 over fp8: prose 38.9 -> 44.4 tok/s, code 44.2 -> 48.7, prefill ~1,090 -> ~1,260 tok/s |
 | KV cache | `0038-glm-kv-fp8` | the DSA latent cache and the indexer's pooled keys as FP8 rows (`KV=fp8`) | the 1M window with 4 requests fits |
 | KV pool | `0072-glm-display-kv` | the first DSA latent planes in a span ending in the GPU's display reservation, which `MemAvailable` does not count; the pool's row copies of those planes by a kernel (a memcpy may not cross the span's two registrations) (`DISPLAY_KV_MIB`, by ezoushen) | 1792 MiB: ~277k more tokens at `PARALLEL=8`; the same bits, decode and prefill |
+| KV pool, sharded | `0129-glm-kv-shard` | each conversation's latent cache once, on its owner Spark (`TF_GLM_KV_SHARD=1`): owner-computed decode attention, prompts fetching only the rows their sparse attention selects or borrowing free rows, part-aware eviction and placement, with the spill tier and the display reservation (by Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)) | [KV sharding](#kv-sharding-optional-in-testing) |
 | Loads, kindling | `0098-glm-mmap-uploads` | the DFlash2 drafter's and the vision tower's loaders copy each tensor out of the safetensors mmap before it goes to the GPU: on kindling spark-os's 64 KiB-page kernel a pageable copy straight from a file mmap hangs in the driver once the process holds GPU memory (by [BadAd84](https://github.com/BadAd84)) | kindling: the server starts (it stopped after the drafter timings); elsewhere the same bytes, one host copy a tensor at start |
 | KV pool, kindling | `0087-glm-display-kv-dispram` | `0072`'s span with its reservation half from kindling spark-os's `dispramd` instead of a DRM dumb buffer, which kindling's `nvidia_drm` (no modeset) cannot make; the rest of `0072` runs unchanged (`DISPLAY_KV_BACKEND=dispram`) (by [BadAd84](https://github.com/BadAd84)) | 2032 MiB: +317,440 tokens at `PARALLEL=4` on three Sparks; the display check 53/53 |
 | Prompt | `0001-glm-exl3-prompt-experts`, `0004-glm-prompt-kernels`, `0009-glm-prefill-kernels`, `0020-glm-prompt-experts-order`, `0024-glm-prompt-select-rows`, `0028-glm-lean-prompt-scratch` | EXL3 expert kernels that keep a prompt chunk's rows in L2, launched in a better order; each row's input rotated once; dense attention only where the sparse pass needs it; token selection in blocks of 512 rows; smaller prompt scratch | faster prefill, less memory at 1M |
@@ -799,7 +863,7 @@ applied with `patch -p0` in filename order); `start.sh` rebuilds or re-pulls the
 | Spill tier, blocks | `0128-glm-spill-blocks` | with `PARALLEL` above 1: every kept state written when kept, in 2,048-token blocks later turns share (equal bytes linked), so it survives a crash; room by conversation (old turns, forks, whole conversations, shared prefixes last), `SPILL_QUOTA`; a request can wait for a prefix another one is prefilling (`PREFIX_WAIT=1`, off by default) (block layout, lineage, write-at-keep ring, release and fsync order from #118 by [BadAd84](https://github.com/BadAd84); eviction by conversation for #122, reported by [xiepengqi](https://github.com/xiepengqi); the rest by Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)) | [Spill tier](#spill-tier-optional) |
 | Kept-state count | `0097-glm-kept-entries-share` | `TF_GLM_CACHE_SHARE_PCT` (the kept-state count as a share of the pool's memory; a ceiling at three quarters of it, so the reservation stays inside the estimate) and the kept states' key arrays built once, not at every admission (issue #84, @jdecker76) |
 | Kept-state limits | `0089-glm-kept-state` | `TF_GLM_KEPT_BYTES_GIB` (a byte budget for the kept states, with the freed blocks handed back to the driver) and `TF_GLM_KEEP_PER_CHAT` (a per-conversation quota of turn-boundary states), both off by default; `/health` `kept_bytes`, `kept_mix` (authored by Thomas Wade, [ThomasWadeZ](https://github.com/ThomasWadeZ), #65) | with both at 0, nothing changes |
-| Conversation ids | `0119-glm-chat-continued` | a stream that continues its conversation without resuming from that conversation's own turn state (an in-turn rewind before the kept turns, issue #104; a state read back from disk; dropped states) keeps the conversation's id instead of starting a new one, so `TF_GLM_KEEP_PER_CHAT` counts the conversation once; `/health` `chats_continued`, `chats_continued_prefill_tokens`, and a log line for one prefilling 4096 tokens or more, with where it left the kept state (by Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)) | with `TF_GLM_KEEP_PER_CHAT=0` (the default) only the counters and the log line |
+| Conversation ids | `0119-glm-chat-continued` | a stream that continues its conversation without resuming from that conversation's own turn state (an in-turn rewind before the kept turns, issue #104; a state read back from disk; dropped states) keeps the conversation's id instead of starting a new one, so `TF_GLM_KEEP_PER_CHAT` counts the conversation once; `/health` `chats_continued`, `chats_continued_prefill_tokens`, and a log line for one prefilling 4096 tokens or more, with where it left the kept state; two sessions with an identical opening message and an identical (temperature 0) first reply cannot be told apart by this match and share one id (by Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)) | with `TF_GLM_KEEP_PER_CHAT=0` (the default) only the counters and the log line |
 | Responses `include` | `0093-responses-include` | `/v1/responses` accepts OpenAI's `include` values and ignores them (reasoning already comes as text, nothing is encrypted); an unknown value or a non-list is still a 400 (issue #73) | the AI SDK's `include: ["reasoning.encrypted_content"]` no longer fails every request |
 | Broken engine | `0118-glm-broken-health-exit` | `/health` reports `ok: false` with its first broken cause, `/metrics` exposes `tensorfold_health:ok`, and opt-in `TF_GLM_EXIT_ON_BROKEN=1` exits non-zero on the latch | broken state is visible; default process lifetime unchanged |
 | Chunked request bodies | `0094-chunked-request-bodies` | a `Transfer-Encoding: chunked` request body (AI SDK clients, Chatbox, proxies) is read like a `Content-Length` one on the chat, completions, tokenizer and Responses routes and the MLX-style server, each route keeping its own size limit (96 MiB for chat); a refused request's body is consumed so it cannot reach the next one. The reader is `request_body.read_body` from TensorFold's 977f2cc by Jordi Posthumus (@JordiPosthumus), which `0084` adds; this patch uses it at the remaining sites (issues #67, #74) | no dechunking proxy; a validation 400 no longer leaves HTML after the JSON on a keep-alive connection |
@@ -869,6 +933,8 @@ with [sparkDash](https://github.com/MiaAI-Lab/sparkDash) ([Performance](#perform
 | `tools/display_kv_check.py [--gpu]` | patch 0072's checks, run in the image (`docker run ... --entrypoint python`, see the file): the setting, the span's mapping and unwinding through a fake driver, the carved planes and the pool's copies; with `--gpu`, the real span on a Spark whose display reservation is free |
 | `tools/qmm_noclusters_check.py [--time]` | patch 0103's checks: the installed 4-bit matmul against a build of the same sources with the old cluster rule, bit for bit at every decode shape of TP=4, TP=3 and TP=2 and at the 28 Mi edge, the path each call takes (and with `TF_GLM_QMM_CLUSTERS=1`), and a CUDA graph on side streams; run in the image on one GPU (`docker run --gpus all ... --entrypoint python`, see the file); `--time` prints the old and new paths' times |
 | `tools/pool_pressure.py [size]` | on a fresh server with nothing else sending requests: two conversations of ~`size` tokens (default 30000) take a turn each, others fill the pool, then each takes another turn; exit 1 when a turn resumes less than 90% of its previous prompt, 2 when the kept-prompt cap stops the fill first (a smaller pool runs it faster: `CONTEXT=131072 KV_POOL_GIB=0.5`) |
+| `tools/kv_shard_check.py` | patch 0129's checks, run in the image (`docker run ... --entrypoint python`, CPU only): the pool in parts at two, three and four ranks, eviction in one part only (the one losing the oldest states), placement by live streams, the sharded pool's size, and the carry: when it runs and when it must not, its op order, the rows sent byte for byte (display span, bf16, a partial row, a bystander at three ranks), moves that do not bounce, spill names by part, `TF_GLM_KV_SHARD_CARRY=0` as before; fails on the unpatched placement |
+| `tools/kv_shard_mutants.sh` | the shard check must fail on each faithful mutant of the carry (a guard, rule or step taken out or turned the wrong way): 63, all killed |
 | `tools/pool_room_check.py` | patch 0074's checks, run in the image (`docker run ... --entrypoint python`, see the file): the pool's room-making on a CPU arena, what it evicts and moves, and rank 1 replaying the same ops |
 | `tools/test_broken_health_exit.py --source-root DIR` | CPU-only broken-state checks against patched TensorFold: settings, first cause, request refusal, round/load/drop errors, health and metrics, subprocess exit (no Torch/GPU) |
 | `tools/parked_pages_check.py` | patch 0122's checks, run in the image (`docker run ... --entrypoint python`, see the file) or against the patched source with `PYTHONPATH`: the start-up budget's count of the pages parked on the kernel's per-CPU free lists beyond their resting level, on synthetic zoneinfo / meminfo files (several CPUs, zones and nodes, a warm start, no `high_min`, no page lists, unreadable and garbled files) and the `available_bytes` / `page_room` figures that include them; no GPU, no model |

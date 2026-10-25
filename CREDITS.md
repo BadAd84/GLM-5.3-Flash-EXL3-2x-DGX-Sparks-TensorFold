@@ -188,6 +188,11 @@ checkpoint's ShapleyMcg attribution and the drafter's license).
   by hard link, reads on a CUDA stream beside decoding after every rank's HAS, pictures by content keys, and the
   prefix wait) by Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X).
   It builds on `0088-glm-spill-tier`, whose credits above apply to the tier around it.
+- `0129-glm-kv-shard` (KV sharding, `TF_GLM_KV_SHARD`; its checks `tools/kv_shard_check.py` and
+  `tools/kv_shard_mutants.sh`): authored by Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub,
+  [@rwojo](https://x.com/rwojo) on X) in [PR #152](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/152),
+  from [issue #151](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/issues/151). It builds on
+  `0128-glm-spill-blocks` and `0119-glm-chat-continued`, whose credits are above.
 - `0089-glm-kept-state` (a byte budget for the kept states and a per-conversation quota, `TF_GLM_KEPT_BYTES_GIB` and
   `TF_GLM_KEEP_PER_CHAT`): authored by Thomas Wade ([ThomasWadeZ](https://github.com/ThomasWadeZ)) in
   [PR #65](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/65) (Apache 2.0); rebased

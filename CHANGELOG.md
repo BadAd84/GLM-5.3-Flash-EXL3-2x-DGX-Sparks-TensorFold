@@ -5,6 +5,36 @@ Every change to this recipe, newest first. Each release names the image it serve
 
 ## Unreleased
 
+- **KV sharding** (patch `0129-glm-kv-shard`, `TF_GLM_KV_SHARD=1`, off by default, by
+  Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)): each
+  conversation's MLA latent cache is stored once, on the Spark that owns it,
+  instead of on every Spark (tensor parallelism splits the heads, but every head reads the whole latent). The owner
+  computes the decode attention of its rows; a prompt chunk on the other Sparks gets only the history rows its sparse
+  attention selects, or borrows free rows and attends locally. Two Sparks, `PARALLEL=8`: the pool holds 1.87x the tokens
+  (1.51M -> 2.83M; 1.85M -> 3.47M with `DISPLAY_KV_MIB=1792`), every reply byte-equal to the unsharded engine's, decode
+  within 1%, prompts within noise when rows can be borrowed and +1.8-3.5% when they are sent. A borrowed row is pinned
+  while its prompt fills (a compaction moving it gave wrong replies under concurrent load; found in review, fixed, and
+  a forced-compaction run on two Sparks is byte-equal). A cache hit whose part has no room no longer drops the cache
+  or evicts kept conversations while another part has room: its rows are carried there (`TF_GLM_KV_SHARD_CARRY`,
+  on; only when it saves a recompute, an eviction or a pause, never to even out the parts). The same shard code serves
+  the tp4 branch (own-row front, microbatching, a carry relayed over a switchless ring's neighbour links); two Sparks
+  and four (tp4, on a ring) tested, three untested. The staging buffers a prompt's history fetch keeps (`shard._grown`) are outside the start-up
+  estimate. Builds on `0128` and `0119` (renumbered from `0118`, which #216 uses). CPU checks: `tools/kv_shard_check.py`, `tools/kv_shard_mutants.sh`.
+
+- **A rewound conversation keeps its id** (patch `0119-glm-chat-continued`, by
+  Robert Wojciechowski ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X)): patch
+  `0089` gave a stream a new conversation id unless it resumed from one of that conversation's own turn states, so a
+  client rewinding before the kept turns (issue #104, @danielbanu), a state read back from the spill tier, or dropped
+  states split one session into several ids, and `TF_GLM_KEEP_PER_CHAT` counted each piece on its own: one session
+  held more states than the quota. Now the stream joins the conversation whose own kept state its prompt repeats past
+  that conversation's first prompt and the first 32 tokens of the reply to it. On two Sparks (PARALLEL=8,
+  `TF_GLM_KEEP_PER_CHAT=2`, `TF_GLM_CACHE_ENTRIES=16`), a ~110k-token session rewinding three rounds every fifth of 16
+  while six chats fill the cache: before, its states went under 3 ids; after, 1, holding 2 states as asked; replies
+  the same drafted and with `draft:false`. New counters `chats_continued`, `chats_continued_prefill_tokens` (`/health`,
+  `/metrics`) and a rank-0 log line for one prefilling 4096 tokens or more, with where the prompt left the kept state
+  and what it resumed from. Two sessions with the same opening message and the same first reply (temperature 0)
+  cannot be told apart by this match and share an id. CPU check: `tools/chat_continued_check.py` (fails on the
+  unpatched engine; also runs `_admitted` itself and the `chat_roots` pruning).
 - **`prepare.sh` warns when a node's NVIDIA CDI device cannot be confirmed** (by
   [SvangenStudios](https://github.com/SvangenStudios), [pull request #207](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/pull/207),
   issue #150): without the host's CDI spec, a `systemctl daemon-reload` can remove the GPU from a running container's
